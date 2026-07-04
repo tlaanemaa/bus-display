@@ -32,7 +32,7 @@ You cannot see the physical screen. Verification loop: deploy → reset → watc
 
 ## Toolchain & commands
 
-Host tools (install once): `pip install esptool mpremote pytest`
+Host tools (install once): `pip install esptool mpremote pytest mpy-cross` (mpy-cross compiles vendored libraries to bytecode — see MicroPython/ESP32 gotchas below for why this matters)
 
 ```
 mpremote connect list                          # find the COM port (call it COM3 below)
@@ -103,7 +103,7 @@ Key library choices (decided): **Microdot** (single-file asyncio web framework, 
 - `requests` (a.k.a. `urequests`): always `resp.close()` (in `finally:`), `gc.collect()` before each fetch, and never hold the raw response text longer than needed. HTTPS works; certs aren't validated by default (fine here).
 - A JSON parse needs ~2–3× the response size in free RAM. If fetches start failing with `MemoryError`, shrink `forecast`/filter params first.
 - Handle Wi-Fi drops: the fetch task should catch exceptions, keep the last good data on screen (with a stale indicator), and let a reconnect loop in `wifi.py` recover. Never let one failed request crash the program.
-- Vendor dependencies as files in `src/lib/`; don't rely on `mip` at runtime.
+- **Vendor dependencies as precompiled `.mpy` bytecode, not raw `.py` — hit this directly, and the failure mode is misleading.** Deploying `src/lib/microdot.py` (58 KB source) as-is and then calling `network.WLAN(...).active(True)` right after raised `OSError: WiFi Out of Memory` with a `wifi nvs cfg alloc out of memory` C-level log line — nothing about the error pointed at the import. Root cause, confirmed by bisecting with `gc.mem_free()` before/after each step: compiling a large `.py` file *on the device* needs far more transient RAM than its final bytecode size (parser/AST overhead), and that transient spike fragmented the heap enough that the WiFi driver's own allocation failed afterward — even though `gc.mem_free()` looked fine again once the import finished (same non-defragmenting-allocator issue as the panel driver, see Hardware section). Fix: `pip install mpy-cross`, then `python -m mpy_cross -o src/lib/microdot.mpy src/lib/microdot.py`, deploy the `.mpy` instead of the `.py` (import statements resolve either extension transparently — no code changes needed). Compiled size dropped 58 KB → 12 KB and the same sequence then left ~77 KB free. **Apply this to any other large vendored library** (font modules, once generated, are likely candidates too). Note: PyPI's `mpy-cross` package (currently 1.27.0) lags the latest firmware release (1.28.0 here) — the bytecode format hasn't changed between them as of 2026-07, confirmed by testing on this exact board, but if a future `.mpy` fails to import with a version/format error, that's the first thing to check.
 
 ## Working conventions for this repo
 

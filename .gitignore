@@ -19,6 +19,11 @@ eggs/
 .eggs/
 lib/
 lib64/
+# src/lib/ is vendored third-party code (Microdot, writer.py, fonts) --
+# it must be committed, not ignored. The generic lib/ rule above is a
+# venv-oriented leftover from the standard Python template.
+!src/lib/
+!src/lib/**
 parts/
 sdist/
 var/
