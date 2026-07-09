@@ -1,0 +1,11 @@
+{
+  "stops": [
+    {"name": "Slussen (EXAMPLE - replace with your stop)", "site_id": 9192},
+    {"name": "Slussen (EXAMPLE - replace with your stop)", "site_id": 9192}
+  ],
+  "direction_code": 2,
+  "forecast_min": 180,
+  "departures_per_stop": 3,
+  "poll_interval_s": 60,
+  "min_refresh_interval_s": 60
+}

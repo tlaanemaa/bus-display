@@ -1,6 +1,10 @@
 # MicroPython firmware images (downloaded for flashing, not source)
 *.bin
 
+# Personal stop config (site ids, name) -- not for a public repo.
+# See src/settings.example.json for the template.
+src/settings.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
