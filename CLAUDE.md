@@ -23,6 +23,15 @@ You cannot see the physical screen. Verification loop: deploy → reset → watc
 - RAM budget: **165,632 bytes free heap measured** right after boot (`gc.collect(); gc.mem_free()`) on this board with MicroPython v1.28.0 ESP32_GENERIC, before any app code runs. The 48 KB framebuffer must be allocated **once, first thing in main.py**, before Wi-Fi/imports fragment the heap.
 - **Never hold two BUF_SIZE (48,000-byte) buffers alive at once — MicroPython's allocator doesn't defragment.** Hit this directly: `epd7in5v2.py`'s first `display()` implementation allocated a second 48 KB buffer (for the inverted "old" plane) while the framebuffer was still alive, and it threw `MemoryError` despite ~165 KB nominally free — a large contiguous block can fail to find room even when the sum of free memory looks fine, because freed/live allocations of varying sizes fragment the heap and nothing compacts it. Fix (already applied): stream large writes through a small reusable scratch buffer (`_write_bulk_inverted`/`_write_fill` in `epd7in5v2.py`, chunked at 512 bytes) instead of ever allocating a second full-size buffer. Apply the same pattern to any future code that transforms the framebuffer (e.g. partial-refresh diffing) — chunk it, don't duplicate it.
 
+## Physical mounting & drawable area (settled 2026-07-09)
+
+The panel is mounted rotated 90° for portrait viewing, inside a picture frame whose window crops the panel's edges unevenly. All content must go through a 90-degree coordinate transform from a "logical" portrait canvas into the native 800×480 physical framebuffer, and stay within a calibrated safe sub-rectangle — not the full logical canvas.
+
+- Logical portrait canvas: 480 wide (`LW`) × 800 tall (`LH`) — swapped from the native 800×480 physical buffer.
+- Transform: for a logical point `(lx, ly)`, physical buffer coords are `(px, py) = (WIDTH - 1 - ly, lx)` (`WIDTH` = 800). A circle keeps its radius; an ellipse's radii swap; a rect's origin/size transforms as `physical.fill_rect(WIDTH - ly0 - lh, lx0, lh, lw)` for logical rect `(lx0, ly0, lw, lh)`. Framebuf can't draw rotated text directly — render into a small scratch buffer sized to the string, then copy its set pixels through the same transform (see `tools/fun_test.py`). Confirmed correct on the physical panel (smiley-face + text smoke test, then the calibration rectangle below).
+- **Safe drawable rectangle**, calibrated against the actual frame with `tools/calibration_guide.py` and confirmed against the physical panel: within the 480×800 logical canvas, margins from each logical edge are **left=7px, top=33px, right=0px, bottom=43px**. Lay content out inside this inset rectangle, not the full canvas — right is 0 because that side had almost no crop to begin with.
+- **Never draw a visible border/outline around the drawable area in the real app** — the owner found a border makes any minor misalignment obvious and distracting. Use the margins above as silent layout bounds, not as a rendered frame.
+
 ## E-paper rules (breaking these damages the panel or wastes hours)
 
 1. Call the driver's `sleep()` after every refresh. Leaving the panel powered in an active state degrades it.
@@ -114,7 +123,7 @@ Key library choices (decided): **Microdot** (single-file asyncio web framework, 
 
 ## Decisions so far
 
-MicroPython on generic ESP32 firmware · mpremote workflow · SL Transport API (Stockholm) · Wi-Fi provisioning via AP-mode captive portal, creds stored only on device · on-device admin panel for display settings · asyncio single-loop architecture · pure-logic modules tested on host with pytest.
+MicroPython on generic ESP32 firmware · mpremote workflow · SL Transport API (Stockholm) · Wi-Fi provisioning via AP-mode captive portal, creds stored only on device · on-device admin panel for display settings · asyncio single-loop architecture · pure-logic modules tested on host with pytest · panel mounted portrait (90° rotation transform) inside a picture frame, with a calibrated safe drawable rectangle and no visible border (see "Physical mounting & drawable area").
 
 ## Future direction (declared by owner — do NOT build yet, but don't design against it)
 
@@ -122,4 +131,4 @@ More content sources will join bus departures later: weather, and data from the 
 
 ## Open questions (settle with the owner, then record above)
 
-Screen layout/design; refresh cadence vs. panel lifespan; which stops/lines (runtime config, not code); whether to use the V2 fast/partial refresh modes; power strategy (USB-powered assumed; deep sleep unexplored); admin panel feature set; when/how weather and Homey Pro sources get added (see Future direction).
+Content/layout design within the drawable area (which sections go where, fonts/sizes); refresh cadence vs. panel lifespan; which stops/lines (runtime config, not code); whether to use the V2 fast/partial refresh modes; power strategy (USB-powered assumed; deep sleep unexplored); admin panel feature set; when/how weather and Homey Pro sources get added (see Future direction).
