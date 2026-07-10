@@ -2,6 +2,7 @@
 The device config API / display settings admin panel will grow in this
 same app as those features get built (see CLAUDE.md architecture).
 """
+import asyncio
 import config
 import machine
 from lib.microdot import Microdot, Response
@@ -44,10 +45,8 @@ async def save_wifi(request):
     print("server: saved wifi config for ssid =", ssid, "-- rebooting")
 
     async def reboot_soon():
-        import asyncio
         await asyncio.sleep(1)
         machine.reset()
 
-    import asyncio
     asyncio.create_task(reboot_soon())
     return Response(body=_SAVED_PAGE, headers={"Content-Type": "text/html"})

@@ -2,9 +2,9 @@
 formatting. No time/machine imports -- takes a UTC calendar tuple in,
 returns a local one out, so it runs under host CPython with pytest (see
 CLAUDE.md "Testability rule"). The device only has UTC from NTP; SL's own
-`display` field sidesteps this for departure countdowns, but showing
-actual current time / last-updated time needs real local time, hence
-this module.
+`display` field sidesteps this for departure countdowns, but showing the
+actual current date/time in the footer needs real local time, hence this
+module.
 """
 
 _DAYS_IN_MONTH = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)

@@ -7,9 +7,11 @@ same command bytes and order for init/clear/display/sleep, same two-plane
 polling. See CLAUDE.md "Hardware" before changing any command byte here.
 
 init_fast/4-gray from the reference driver are not ported -- add them
-only when the project actually needs them. init_part/display_Partial ARE
-ported (2026-07-09, see CLAUDE.md "Screen refresh strategy") for the
-hybrid full/partial refresh policy in main.py.
+only when the project actually needs them. Partial refresh IS ported, but
+as a differential update (init_part + partial_begin/partial_old/partial_new,
+2026-07-10, see CLAUDE.md "Screen refresh strategy") rather than Waveshare's
+stock one-plane display_Partial() -- see the block comment above those
+methods for why.
 """
 from machine import Pin, SPI
 import time

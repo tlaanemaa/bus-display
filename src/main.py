@@ -73,7 +73,7 @@ _FB_WIDTH = 800
 _FB_HEIGHT = 480
 
 
-async def _fetch_all_stops(cfg):
+def _fetch_all_stops(cfg):
     """Fetch every configured stop independently, in the order given in
     settings.json -- no primary/fallback/suitability logic anymore, just
     an ordered list of stops the owner cares about (see CLAUDE.md
@@ -243,7 +243,7 @@ async def display_loop(cfg):
         pull_bucket = int(time.time() // data_pull_interval_s)
         if pull_bucket != last_pull_bucket:
             try:
-                results = await _fetch_all_stops(cfg)
+                results = _fetch_all_stops(cfg)
             except Exception as e:
                 print("display_loop: unexpected fetch error:", e)
                 results = [None] * len(cfg["stops"])

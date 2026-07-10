@@ -52,7 +52,7 @@ HEADER_SCALE = 3   # stop name, section label
 HERO_SCALE = 7     # each stop's next departure's countdown -- the focal point of the whole screen
 CAPTION_SCALE = 2  # "<line> <destination>" under the hero, identifies which bus
 ROW_SCALE = 2      # each stop's other departures
-FOOTER_SCALE = 2   # last-updated + current date/time -- bumped up from an earlier, too-small pass
+FOOTER_SCALE = 2   # current date/time -- bumped up from an earlier, too-small pass
 
 RULE_HEIGHT = 3
 HEADER_RULE_GAP = 8      # gap between stop name and the rule under it
