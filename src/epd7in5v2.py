@@ -6,8 +6,10 @@ same command bytes and order for init/clear/display/sleep, same two-plane
 (0x10 + 0x13) write on every refresh, same 0x71-before-each-busy-read
 polling. See CLAUDE.md "Hardware" before changing any command byte here.
 
-init_fast/init_part/4-gray/partial-refresh from the reference driver are
-not ported -- add them only when the project actually needs them.
+init_fast/4-gray from the reference driver are not ported -- add them
+only when the project actually needs them. init_part/display_Partial ARE
+ported (2026-07-09, see CLAUDE.md "Screen refresh strategy") for the
+hybrid full/partial refresh policy in main.py.
 """
 from machine import Pin, SPI
 import time
@@ -131,6 +133,33 @@ class EPD7in5V2:
         self._command(0x60)  # TCON setting
         self._data_byte(0x22)
 
+    def init_part(self):
+        """Enter partial-refresh mode. Same hardware reset + panel-setting
+        + power-on sequence as init(), but skips resolution/VCOM/TCON
+        setup and instead sets the partial-mode booster registers
+        (0xE0/0xE5) -- ported verbatim from Waveshare's epd7in5_V2.py
+        init_part(), fetched raw 2026-07-09. Do not add the resolution/
+        VCOM/TCON calls from init() here "for safety" -- the reference
+        doesn't have them in this function, don't re-derive.
+
+        Called before EVERY partial refresh in the current differential
+        design (2026-07-10). The hardware reset here wipes the controller's
+        old-image RAM, but that no longer matters: partial_old() re-uploads
+        the correct previous image on 0x10 explicitly, so the differential
+        has a valid reference regardless of what reset left behind. This
+        replaces the earlier "init_part() once per run, keep panel awake"
+        approach -- see partial_old() and main.py's _draw_and_refresh()."""
+        self._reset()
+        self._command(0x00)  # panel setting
+        self._data_byte(0x1F)
+        self._command(0x04)  # power on
+        time.sleep_ms(100)
+        self._read_busy()
+        self._command(0xE0)
+        self._data_byte(0x02)
+        self._command(0xE5)
+        self._data_byte(0x6E)
+
     def clear(self):
         self._command(0x10)
         self._write_fill(0xFF, BUF_SIZE)
@@ -152,6 +181,76 @@ class EPD7in5V2:
         self._write_bulk_inverted(buf)
         self._command(0x13)
         self._write_bulk(buf)
+        self._command(0x12)
+        time.sleep_ms(100)
+        self._read_busy()
+
+    # --- Differential partial refresh (2026-07-10) ------------------------
+    #
+    # A partial refresh on the 7.5" V2 is a *differential* update: the
+    # controller drives each pixel from whatever is in its 0x10 "old image"
+    # RAM to the 0x13 "new image" RAM, using a gentle no-flash waveform.
+    # Waveshare's stock display_Partial() (and this driver's earlier
+    # display_partial()) sends ONLY the 0x13 plane, leaving 0x10 as
+    # stale/garbage -- so pixels get driven against a wrong reference and
+    # ghosting/corruption accumulates. The fix (per the betterepd7in5
+    # community driver) is to send the ACTUAL previously-displayed image on
+    # 0x10 as well, so only genuinely-changed pixels move. Confirmed against
+    # betterepd7in5's source: it sends 0x10 (old) + 0x13 (new) every partial.
+    #
+    # These are split into begin/old/new so the caller can serve BOTH planes
+    # from a SINGLE 48 KB buffer -- render the old frame, stream it to 0x10,
+    # re-render the new frame into the same buffer, stream it to 0x13. Once
+    # bytes are shifted out over SPI they live in the panel controller's RAM,
+    # not ESP32 RAM, so overwriting the Python buffer between planes is safe.
+    # This keeps the "never hold two BUF_SIZE buffers alive at once" rule
+    # (see CLAUDE.md RAM notes) -- do NOT add a display_partial_diff(old, new)
+    # that takes two buffers.
+    #
+    # Enter partial mode with init_part() (once, right before this sequence),
+    # then: partial_begin() -> partial_old(old_buf) -> partial_new(new_buf).
+    # main.py's _draw_and_refresh() drives this and sleeps the panel after.
+
+    def partial_begin(self):
+        """Set the partial-mode VCOM/data interval and select the full-frame
+        (0,0)..(WIDTH,HEIGHT) partial window. Full-frame (not a cropped
+        sub-rectangle) matches Waveshare's own demo usage and avoids
+        byte-alignment window math; the calibrated drawable area already
+        covers most of the panel, so a cropped window would save little."""
+        self._command(0x50)
+        self._data_byte(0xA9)
+        self._data_byte(0x07)
+
+        self._command(0x91)  # enter partial mode
+        self._command(0x90)  # partial window: full frame, (0,0) .. (WIDTH,HEIGHT)
+        for b in (0x00, 0x00, (WIDTH - 1) // 256, (WIDTH - 1) % 256,
+                  0x00, 0x00, (HEIGHT - 1) // 256, (HEIGHT - 1) % 256, 0x01):
+            self._data_byte(b)
+
+    def partial_old(self, buf):
+        """Send the previously-displayed image as the 0x10 "old" plane, so
+        the differential update below only drives pixels that actually
+        changed. buf is the same MONO_HLSB layout as display()/partial_new.
+
+        POLARITY (one empirical unknown, confirm on hardware): this inverts
+        buf to match partial_new's 0x13 plane, which is confirmed legible
+        inverted on this panel. If changed pixels ghost/darken instead of
+        resolving cleanly, switch this to self._write_bulk(buf) (non-inverted)
+        -- that's the whole fix if the starting polarity is wrong."""
+        if len(buf) != BUF_SIZE:
+            raise ValueError("buffer must be %d bytes, got %d" % (BUF_SIZE, len(buf)))
+        self._command(0x10)
+        self._write_bulk_inverted(buf)
+
+    def partial_new(self, buf):
+        """Send the new image as the 0x13 plane and trigger the partial
+        refresh. Call after partial_begin() and partial_old(). Inverted to
+        match the earlier working display_partial() polarity."""
+        if len(buf) != BUF_SIZE:
+            raise ValueError("buffer must be %d bytes, got %d" % (BUF_SIZE, len(buf)))
+        self._command(0x13)
+        self._write_bulk_inverted(buf)
+
         self._command(0x12)
         time.sleep_ms(100)
         self._read_busy()

@@ -64,6 +64,11 @@ WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_l
                              # (2 stops x 3 retries x 15s timeout each = ~92s) -- if settings.json ever lists
                              # more than ~3 stops, this may need raising.
 
+_TICK_LAG_S = 2          # fire this many seconds AFTER each wall-clock tick boundary, never before --
+                          # see _seconds_to_next_tick (waking early would render the stale, pre-rollover minute)
+_WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
+                          # interval longer than the WDT window can't trip a spurious reboot during a normal wait
+
 _FB_WIDTH = 800
 _FB_HEIGHT = 480
 
@@ -88,6 +93,36 @@ async def _fetch_all_stops(cfg):
     return results
 
 
+def _seconds_to_next_tick(interval_s):
+    """Seconds to sleep so the next wake lands just AFTER the next wall-clock
+    multiple of interval_s -- e.g. interval 60 wakes ~_TICK_LAG_S seconds
+    past the top of each minute (HH:MM:00), not 60s after boot.
+
+    Deliberately errs LATE, never early: int(time.time()) floors to whole
+    seconds so we never undershoot the boundary, and _TICK_LAG_S adds a
+    small margin on top. Waking even slightly early would render the old,
+    pre-rollover minute and go stale instantly; waking a second or two late
+    costs nothing on a glance display (owner's call). Uses the NTP-synced
+    RTC; before NTP sync the epoch is arbitrary but ticks are still evenly
+    spaced, so nothing breaks -- they just aren't aligned to real wall time
+    until the clock is set."""
+    return interval_s - (int(time.time()) % interval_s) + _TICK_LAG_S
+
+
+async def _sleep_until_next_tick(wdt, interval_s):
+    """Await the next wall-clock-aligned tick (see _seconds_to_next_tick),
+    feeding the watchdog every _WDT_FEED_CHUNK_S so a render interval longer
+    than the WDT window doesn't trip a spurious reboot during a normal idle
+    wait. The ESP32 is awake during asyncio.sleep either way, so chunking
+    the wait to feed the WDT costs nothing."""
+    remaining = _seconds_to_next_tick(interval_s)
+    while remaining > 0:
+        wdt.feed()
+        chunk = remaining if remaining < _WDT_FEED_CHUNK_S else _WDT_FEED_CHUNK_S
+        await asyncio.sleep(chunk)
+        remaining -= chunk
+
+
 def _local_now_strings():
     """(date_str, time_str) for the device's current local (Stockholm)
     time, computed from the NTP-synced UTC clock -- see localtime.py."""
@@ -96,86 +131,172 @@ def _local_now_strings():
     return localtime.format_date(ly, lmo, ld), localtime.format_time(lh, lmi)
 
 
-def _draw_and_refresh(epd, sections, footer):
+def _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full):
     """Allocates the 48KB framebuffer only for this draw+push window, then
     lets it be freed (no reference survives the function returning) --
-    see module docstring for why it must not stay resident."""
+    see module docstring for why it must not stay resident. Exactly ONE
+    48KB buffer is ever alive at a time, even for the differential partial
+    path below (see CLAUDE.md RAM notes).
+
+    `full` picks the refresh mode (see CLAUDE.md "Screen refresh strategy"
+    for the tradeoff): a full refresh flashes black/white and fully
+    discharges every pixel (clears accumulated ghosting); a partial refresh
+    is near-instant with no flash. display_loop() decides the cadence.
+
+    Partial refresh is a TRUE DIFFERENTIAL update (2026-07-10): the panel's
+    partial mode drives each pixel from its 0x10 "old image" plane to its
+    0x13 "new image" plane, so we must supply the actual previously-drawn
+    frame (prev_sections/prev_footer) on 0x10, not just the new frame. That
+    makes only genuinely-changed pixels move -> minimal ghosting, and it
+    means the panel can be slept after every refresh (e-paper rule 1
+    restored) because the differential no longer depends on controller RAM
+    surviving between calls -- the old plane is re-uploaded explicitly. See
+    epd7in5v2.py's partial_old()/partial_new(). One buffer serves both
+    planes: render old -> stream to 0x10 -> re-render new into the SAME
+    buffer -> stream to 0x13 (the 0x10 bytes already live in the panel
+    controller by then)."""
     fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
     fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
-    display.draw_home(fb, sections, footer)
 
-    epd.init()
-    epd.display(fb_buf)
+    if full:
+        display.draw_home(fb, sections, footer)
+        epd.init()
+        epd.display(fb_buf)
+        epd.sleep()
+        return
+
+    # Differential partial: old plane (0x10) first, then new plane (0x13).
+    epd.init_part()
+    epd.partial_begin()
+    display.draw_home(fb, prev_sections, prev_footer)  # OLD frame -> 0x10
+    epd.partial_old(fb_buf)
+    display.draw_home(fb, sections, footer)            # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
+    epd.partial_new(fb_buf)
     epd.sleep()
 
 
 async def display_loop(cfg):
-    """Long-lived task: poll SL every cfg["poll_interval_s"], but only push
-    an actual panel refresh when the rendered text changed AND at least
-    cfg["min_refresh_interval_s"] has passed since the last one (e-paper
-    rules 1-2 in CLAUDE.md -- full refresh only when content changed, and
-    not more often than the panel can tolerate). The footer's current-time
-    line changes every minute, which naturally forces a refresh at that
-    cadence per the owner's request -- see CLAUDE.md "Departures logic &
-    stops".
+    """Long-lived task. Ticks once per render interval, each tick
+    re-rendering from cached departures + the current clock and pushing a
+    panel refresh only when the rendered text actually changed (e-paper
+    rule 2). Fresh SL data is pulled on its own cadence, gated independently
+    of the render tick (both default 1 min but separately tunable -- e.g.
+    render every minute for a live clock while pulling data less often to be
+    gentler on the API).
+
+    Ticks are aligned to the WALL CLOCK, not to N-minutes-from-boot: the
+    loop sleeps until just after the next multiple of the render interval
+    (see _seconds_to_next_tick), so a 1-min interval wakes at the top of
+    each minute (HH:MM:00) and the footer clock flips right as the real
+    minute does. If a tick's work runs long (worst case a fetch exhausting
+    all retries, ~90s), that tick simply lands on a later boundary and the
+    next tick re-aligns -- it never drifts into N-min-from-last-wake.
+
+    Three intervals, all in cfg IN MINUTES (see settings.example.json;
+    converted to seconds below -- there's no reason to touch an e-ink panel
+    more than ~1x/min):
+      - data_pull_interval_min    how often to fetch fresh departures from SL
+      - render_interval_min       tick cadence: re-render + refresh-if-changed
+      - full_refresh_interval_min how often a push is a full (flashing)
+                                  refresh vs a differential partial
+
+    Refresh MODE (full vs. partial) -- see CLAUDE.md "Screen refresh
+    strategy": most pushes use the near-instant, non-flashing DIFFERENTIAL
+    partial mode, and a full (flashing) refresh is used at least every
+    full_refresh_interval_s to clear residue. Partial refreshes need the
+    previously-drawn frame (prev_sections/prev_footer) as their 0x10 "old
+    image" plane, so it's cached after every refresh; the very first
+    refresh is forced full (no previous frame exists yet). The panel is
+    slept after EVERY refresh (e-paper rule 1) -- the differential
+    re-uploads the old plane explicitly, so it doesn't depend on the panel
+    staying powered between calls.
 
     Every configured stop is always shown (no primary/fallback anymore).
     Each stop's own last-good departures are kept independently, so one
     stop's fetch failure doesn't blank out another stop that's still
-    fetching fine -- "updated" only advances when ALL stops succeed in
-    the same cycle, so a partial failure is still visible as stale.
+    fetching fine -- the footer's "(stale)" suffix is the only staleness
+    signal (see display.footer_lines).
     """
     epd = EPD7in5V2()
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
     last_rendered = None
-    last_refresh_ticks = None
+    last_full_refresh_ticks = None
+    last_pull_bucket = None  # wall-clock // data_pull_interval_s of the last fetch
+    # Config is in MINUTES (there's no reason to touch an e-ink panel more than
+    # ~1x/min); converted to seconds here for the timing math.
+    data_pull_interval_s = cfg.get("data_pull_interval_min", 1) * 60
+    render_interval_s = cfg.get("render_interval_min", 1) * 60
+    full_refresh_interval_s = cfg.get("full_refresh_interval_min", 30) * 60
     last_good = [[] for _ in cfg["stops"]]  # each stop's last-known departures
-    updated_str = "--:--"  # last-updated local time, only advances when every stop succeeds
+    stale = True
+    prev_sections = None  # last-drawn frame, reused as the 0x10 old plane for the next partial
+    prev_footer = None
 
     while True:
         wdt.feed()
-        try:
-            results = await _fetch_all_stops(cfg)
-        except Exception as e:
-            print("display_loop: unexpected fetch error:", e)
-            results = [None] * len(cfg["stops"])
 
-        all_ok = all(r is not None for r in results)
-        for i, r in enumerate(results):
-            if r is not None:
-                last_good[i] = r
-        stale = not all_ok
+        # Pull fresh departures on the wall-clock-aligned data_pull cadence,
+        # independent of the render tick. The bucket is integer
+        # wall-clock-seconds // interval, so a pull fires exactly once per
+        # interval regardless of sub-second tick jitter (and aligns pulls to
+        # the clock the same way the render tick is aligned).
+        pull_bucket = int(time.time() // data_pull_interval_s)
+        if pull_bucket != last_pull_bucket:
+            try:
+                results = await _fetch_all_stops(cfg)
+            except Exception as e:
+                print("display_loop: unexpected fetch error:", e)
+                results = [None] * len(cfg["stops"])
+
+            all_ok = all(r is not None for r in results)
+            for i, r in enumerate(results):
+                if r is not None:
+                    last_good[i] = r
+            stale = not all_ok
+            last_pull_bucket = pull_bucket
 
         if not any(last_good):
-            await asyncio.sleep(cfg["poll_interval_s"])
+            await _sleep_until_next_tick(wdt, render_interval_s)
             continue
-
-        if all_ok:
-            _, updated_str = _local_now_strings()
 
         sections = [display.stop_section(stop["name"], deps) for stop, deps in zip(cfg["stops"], last_good)]
         date_str, time_str = _local_now_strings()
-        footer = display.footer_lines(updated_str, date_str, time_str, stale=stale)
+        footer = display.footer_lines(date_str, time_str, stale=stale)
         flat = []
         for section in sections:
             flat.extend(display.section_lines(section))
         rendered_key = "\n".join(flat + footer)
 
         now = time.ticks_ms()
-        due_for_refresh = (
-            last_refresh_ticks is None
-            or time.ticks_diff(now, last_refresh_ticks) >= cfg["min_refresh_interval_s"] * 1000
+        full_due = (
+            last_full_refresh_ticks is None
+            or time.ticks_diff(now, last_full_refresh_ticks) >= full_refresh_interval_s * 1000
         )
-        if rendered_key != last_rendered and due_for_refresh:
-            print("display_loop: content changed, refreshing panel")
-            _draw_and_refresh(epd, sections, footer)
+        content_changed = rendered_key != last_rendered
+
+        # Only refresh when content actually changed (e-paper rule 2). The
+        # mode is full when a full refresh is due (or on the very first
+        # refresh, which has no previous frame to differential against),
+        # otherwise the non-flashing differential partial. Since we only
+        # partial on a content change, ghosting only accumulates when we're
+        # actually redrawing -- so gating the periodic full on content_changed
+        # too is correct: nothing to clear if nothing has been redrawing.
+        if content_changed:
+            full = full_due or prev_sections is None
+            print("display_loop: content changed, %s refresh" % ("full" if full else "partial"))
+            _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full=full)
             gc.collect()
             last_rendered = rendered_key
-            last_refresh_ticks = now
-        elif rendered_key != last_rendered:
-            print("display_loop: content changed but min_refresh_interval_s not elapsed, skipping panel write")
+            prev_sections = sections
+            prev_footer = footer
+            if full:
+                last_full_refresh_ticks = now
 
-        await asyncio.sleep(cfg["poll_interval_s"])
+        # _sleep_until_next_tick feeds the WDT throughout the idle wait, so a
+        # long fetch (~90s worst case) and the sleep are bounded separately,
+        # not summed, against the 150s WDT window -- and any render interval is
+        # safe even if it exceeds that window.
+        await _sleep_until_next_tick(wdt, render_interval_s)
 
 
 async def main():

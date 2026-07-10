@@ -135,20 +135,24 @@ def section_lines(section):
     return lines
 
 
-def footer_lines(updated_str, date_str, time_str, stale=False):
-    """Pure: footnote text -- last-updated time first, then current local
-    date/time (owner, 2026-07-09: "flip the rows, update time first, date
-    second"). One row if it fits at FOOTER_SCALE, else two. Showing both
-    makes staleness visible at a glance instead of requiring date math."""
-    text = "Updated %s   %s %s" % (updated_str, date_str, time_str)
+def footer_lines(date_str, time_str, stale=False):
+    """Pure: footnote text -- just the current local date/time. Used to
+    show a separate "last updated" time too, but with poll and refresh
+    both on a ~60s cadence that was almost always identical to "now" and
+    added no information (owner, 2026-07-09: "remove ... it appears to
+    always be the same as the current date and time"). Staleness is still
+    surfaced -- via the "(stale)" suffix, which appears whenever the last
+    fetch cycle didn't succeed for every configured stop -- just without a
+    second timestamp to prove it. One row if it fits at FOOTER_SCALE, else
+    two."""
+    text = "%s %s" % (date_str, time_str)
     if stale:
         text += " (stale)"
     max_cols = CONTENT_W // (8 * FOOTER_SCALE)
     if len(text) <= max_cols:
         return [text]
-    line1 = ("Updated %s" % updated_str) + (" (stale)" if stale else "")
-    line2 = "%s %s" % (date_str, time_str)
-    return [line1[:max_cols], line2[:max_cols]]
+    line2 = time_str + (" (stale)" if stale else "")
+    return [date_str[:max_cols], line2[:max_cols]]
 
 
 def draw_home(fb, sections, footer):

@@ -6,6 +6,7 @@
   "direction_code": 2,
   "forecast_min": 180,
   "departures_per_stop": 3,
-  "poll_interval_s": 60,
-  "min_refresh_interval_s": 60
+  "data_pull_interval_min": 1,
+  "render_interval_min": 1,
+  "full_refresh_interval_min": 30
 }
