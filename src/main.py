@@ -64,8 +64,6 @@ WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_l
                              # (2 stops x 3 retries x 15s timeout each = ~92s) -- if settings.json ever lists
                              # more than ~3 stops, this may need raising.
 
-_TICK_LAG_S = 2          # fire this many seconds AFTER each wall-clock tick boundary, never before --
-                          # see _seconds_to_next_tick (waking early would render the stale, pre-rollover minute)
 _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
                           # interval longer than the WDT window can't trip a spurious reboot during a normal wait
 
@@ -94,19 +92,23 @@ def _fetch_all_stops(cfg):
 
 
 def _seconds_to_next_tick(interval_s):
-    """Seconds to sleep so the next wake lands just AFTER the next wall-clock
-    multiple of interval_s -- e.g. interval 60 wakes ~_TICK_LAG_S seconds
-    past the top of each minute (HH:MM:00), not 60s after boot.
+    """Seconds to sleep so the next wake lands on the next wall-clock multiple
+    of interval_s -- e.g. interval 60 wakes at the top of each minute
+    (HH:MM:00), not 60s after boot, so the on-screen clock flips in step with
+    a phone.
 
-    Deliberately errs LATE, never early: int(time.time()) floors to whole
-    seconds so we never undershoot the boundary, and _TICK_LAG_S adds a
-    small margin on top. Waking even slightly early would render the old,
-    pre-rollover minute and go stale instantly; waking a second or two late
-    costs nothing on a glance display (owner's call). Uses the NTP-synced
+    Never wakes EARLY -- the property that matters, since waking before the
+    rollover would render the old minute and leave the clock a full minute
+    behind. int(time.time()) floors to whole seconds, so the computed sleep
+    overshoots the true boundary by the current sub-second fraction: we land
+    0..1s after HH:MM:00, never before it. (An earlier fixed +2s margin on
+    top of this was removed 2026-07-10 as premature -- the floor alone already
+    guarantees never-early, and a sub-second overshoot is imperceptible on a
+    glance display while +2s visibly lagged the clock.) Uses the NTP-synced
     RTC; before NTP sync the epoch is arbitrary but ticks are still evenly
     spaced, so nothing breaks -- they just aren't aligned to real wall time
     until the clock is set."""
-    return interval_s - (int(time.time()) % interval_s) + _TICK_LAG_S
+    return interval_s - (int(time.time()) % interval_s)
 
 
 async def _sleep_until_next_tick(wdt, interval_s):
@@ -185,12 +187,12 @@ async def display_loop(cfg):
     gentler on the API).
 
     Ticks are aligned to the WALL CLOCK, not to N-minutes-from-boot: the
-    loop sleeps until just after the next multiple of the render interval
-    (see _seconds_to_next_tick), so a 1-min interval wakes at the top of
-    each minute (HH:MM:00) and the footer clock flips right as the real
-    minute does. If a tick's work runs long (worst case a fetch exhausting
-    all retries, ~90s), that tick simply lands on a later boundary and the
-    next tick re-aligns -- it never drifts into N-min-from-last-wake.
+    loop sleeps onto the next multiple of the render interval (see
+    _seconds_to_next_tick), so a 1-min interval wakes at the top of each
+    minute (HH:MM:00, within a sub-second) and the footer clock flips right
+    as the real minute does. If a tick's work runs long (worst case a fetch
+    exhausting all retries, ~90s), that tick simply lands on a later boundary
+    and the next tick re-aligns -- it never drifts into N-min-from-last-wake.
 
     Three intervals, all in cfg IN MINUTES (see settings.example.json;
     converted to seconds below -- there's no reason to touch an e-ink panel
