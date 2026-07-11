@@ -325,6 +325,15 @@ async def main():
         # See CLAUDE.md "Departures logic & stops".
         await asyncio.sleep_ms(3000)
 
+        # Warm the font advance caches on this still-clean heap, before the
+        # fetch/render loop -- so no font state is allocated during a live
+        # draw, where it would strand into the framebuffer region and
+        # starve the next TLS handshake (see bitfont.py docstring).
+        try:
+            display.warm_fonts()
+        except Exception as e:
+            print("main: font warm failed (non-fatal):", e)
+
         await display_loop(settings.load())
     else:
         wifi.start_ap()

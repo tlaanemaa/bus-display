@@ -70,9 +70,10 @@ def test_stop_section_no_departures_skips_hero():
 def test_stop_section_truncates_long_destination_to_fit():
     deps = _deps(("430X", "Gustavsbergs centrum via some very long way", "Nu"))
     section = display.stop_section("Stop", deps)
-    max_w = display.CONTENT_W - display._scaled_badge_w(
-        "430X", display.HEADLINE_SCALE, display.BADGE_PAD_X_HEADLINE) - display.GAP_BADGE_DEST
-    assert display._scaled_w(section["dest"], display.HEADLINE_SCALE) <= max_w
+    head = display._fonts()["head"]
+    max_w = display.CONTENT_W - display._badge_w(
+        head, "430X", display.BADGE_PAD_X_HEADLINE) - display.GAP_BADGE_DEST
+    assert head.measure(section["dest"]) <= max_w
     assert len(section["dest"]) < len(deps[0]["destination"])
 
 

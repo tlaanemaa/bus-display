@@ -50,7 +50,11 @@ echo Deploying to %PORTDESC% ...
 rem --- top-level files: config, drivers, app modules, settings -------------
 rem settings.example.json is a repo-only template -- the device only needs the
 rem real settings.json, so skip the example to keep the device clean.
-for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\*.json") do (
+rem *.mpy included so precompiled top-level modules (bitfont.mpy) deploy too;
+rem MicroPython prefers the .mpy over the same-named .py, and shipping .mpy
+rem avoids the on-device compile that spikes/fragments RAM (see CLAUDE.md
+rem gotchas -- the same reason microdot is vendored as .mpy).
+for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
     if /I not "%%~nxF"=="settings.example.json" (
         echo   cp %%~nxF
         %MP% %CONN% fs cp "%%F" ":%%~nxF"
@@ -65,6 +69,16 @@ rem prefers the .mpy and ignores the .py, so the .py is just inert extra flash.
 for %%F in ("%SRCDIR%\lib\*.py" "%SRCDIR%\lib\*.mpy") do (
     echo   cp lib/%%~nxF
     %MP% %CONN% fs cp "%%F" ":lib/%%~nxF"
+    if errorlevel 1 goto :fail
+)
+
+rem --- streamed bitmap fonts (src\fonts\ -> :fonts) -------------------------
+rem The .fnt files bitfont.py reads glyph-by-glyph from flash (see
+rem tools\gen_font.py). Small (~26 KB total) and never held resident.
+%MP% %CONN% fs mkdir :fonts >nul 2>nul
+for %%F in ("%SRCDIR%\fonts\*.fnt") do (
+    echo   cp fonts/%%~nxF
+    %MP% %CONN% fs cp "%%F" ":fonts/%%~nxF"
     if errorlevel 1 goto :fail
 )
 

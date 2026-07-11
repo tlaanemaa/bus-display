@@ -80,6 +80,8 @@ src/                 # maps 1:1 to the device filesystem root
   wifi.py            # STA connect w/ timeout, AP fallback
   server.py          # Microdot admin app (AP-mode Wi-Fi setup only)
   display.py         # layout/render onto the framebuf; logs what it drew
+  bitfont.py         # streamed 1-bit font reader (deployed as bitfont.mpy)
+  fonts/             # *.fnt bitmap fonts streamed from flash (gen_font.py)
   epd7in5v2.py       # panel driver (Waveshare port, pins above)
   sl.py              # thin HTTPS wrapper: fetch departures JSON
   departures.py      # PURE parse/filter/format — no hardware imports
@@ -87,11 +89,20 @@ src/                 # maps 1:1 to the device filesystem root
   lib/               # vendored (microdot.mpy) — don't hand-edit
 tests/               # pytest on host CPython
 tools/               # host-side scripts (bring-up, one-off experiments)
+                     #   gen_font.py: TTF -> .fnt; diag_mem.py: RAM probe
 ```
 
 **Testability rule**: anything pure (parsing, filtering, formatting, layout/time math) goes in modules with no `machine`/`network`/`requests` top-level imports, so it runs under host pytest. Hardware and network stay in thin adapters. On-device behavior is verified by eye — this is the only automated testing.
 
-**Key library choices**: **Microdot** (single-file asyncio web framework, in `src/lib/`) for the admin panel — runs **only during AP-mode setup**, not once connected. **peterhinch/micropython-font-to-py** is the declared upgrade over framebuf's built-in 8 px font (unreadable at distance, ASCII-only); current code scales the built-in font as a stopgap.
+**Key library choices**: **Microdot** (single-file asyncio web framework, in `src/lib/`) for the admin panel — runs **only during AP-mode setup**, not once connected. **Fonts**: a custom **streamed bitmap font** (`bitfont.py` + `fonts/*.fnt`, see "Fonts" below) replaced framebuf's built-in 8 px font. **peterhinch/micropython-font-to-py is the wrong tool here** and was tried+reverted (2026-07-11): it emits a *resident* Python glyph module, and even ~15 KB resident crashes the live loop's 48 KB framebuffer alloc. The streamed approach keeps glyphs on flash instead.
+
+### Fonts (streamed bitmap — settled 2026-07-12)
+
+Print-like **Bitter** (slab serif; robust at 1-bit, strong hero digits) rendered on the host into compact 1-bit `.fnt` files and **streamed from flash one glyph at a time** — never resident. This is what makes a smooth font viable on this PSRAM-less board. The panel is 1-bit (no anti-aliasing), so smoothness comes purely from rendering glyphs at their real pixel size, not scaling an 8×8 cell.
+
+- **Three sizes** (fixed px, not the old arbitrary scale): `bitter_hero.fnt` (~87 px countdown, weight 800), `bitter_head.fnt` (~35 px labels/headline, 700), `bitter_row.fnt` (~27 px rows/footer, 500). Total ~26 KB flash, **zero resident glyph data**.
+- **Format + regen**: `tools/gen_font.py` (host, Pillow) renders `tools/fonts/Bitter-var.ttf` → `src/fonts/*.fnt` (advance-width cells, on-disk index, ink-cropped; format documented in that file). `bitfont.py` is its exact reader. Charset = printable ASCII (Swedish is transliterated upstream by `_to_ascii`). Deploy `bitfont.mpy` (precompiled) so import doesn't compile-fragment the heap.
+- **RAM discipline is load-bearing (see bitfont.py docstring)** — this is a *second* front of the same RAM-vs-HTTPS conflict. mbedtls's SL handshake needs a large *contiguous* block, and ANY heap churn during a draw (while the 48 KB framebuffer is alive) can strand an object into it and starve the next fetch → `MBEDTLS_ERR_MPI_ALLOC_FAILED`. An early version that did (per-glyph `bytes` reads, per-call lambda closures, lazy cache growth) fetched fine on the *first* cycle then went stale on every one after the first draw — confirmed on hardware. The fix, all three needed: (1) one module-level scratch buffer reused via `readinto` (no per-glyph alloc); (2) a module-level `plot` function + inlined transform (no per-run tuple / per-call closure); (3) **pre-warm the advance caches at boot** via `display.warm_fonts()` before the loop, so nothing font-related is allocated during a live draw. With these, the freed framebuffer region returns to its clean post-fetch state each cycle and fetches stay reliable (verified: 3 boots + a 280 s run, zero failures). **Do not reintroduce per-draw allocations in the render path.**
 
 ## SL Transport API (verified 2026-07)
 
@@ -117,7 +128,7 @@ tools/               # host-side scripts (bring-up, one-off experiments)
   Pull and render are separate knobs (pull less often than you render if you want a live clock but gentler API use).
 - **Ticks aligned to the WALL CLOCK, landing on `HH:MM:00`** so the on-screen clock flips in step with a phone. `_seconds_to_next_tick()` sleeps onto the next interval multiple using the NTP-synced `time.time()`. **Never wakes early** — the property that matters, since early = rendering the old minute, a full minute behind. `int(time.time())` floors, so the computed sleep overshoots the boundary by the sub-second fraction → we wake 0–1 s after `HH:MM:00`. (An earlier fixed `+2 s` margin was removed as premature — it visibly lagged the clock behind a phone.) Data pulls use an integer `time.time() // interval` bucket so they fire once per interval regardless of jitter. A long tick (worst case ~90 s) just lands on a later boundary; no drift accumulates.
 - **Watchdog fed during idle waits**: `_sleep_until_next_tick()` feeds the WDT every 60 s while sleeping, so a `render_interval_min` larger than the 150 s WDT window won't trip a spurious reboot mid-wait. The ESP32 stays awake between ticks (Wi-Fi up, RAM live); only the **panel** deep-sleeps (`epd.sleep()`). `machine.deepsleep` is deliberately unused — it would wipe `prev_sections`/`prev_footer` (the differential's old-plane source), forcing a full flash every wake (see "Open questions", power).
-- **Swedish characters (å/ä/ö/é/ü) corrupt on-screen** (framebuf's font is ASCII-only). `departures.parse_departures()` transliterates via `_to_ascii` as a stopgap until proper fonts are generated.
+- **Swedish characters (å/ä/ö/é/ü)** are transliterated to plain ASCII by `departures.parse_departures()` via `_to_ascii`. Historically forced by framebuf's ASCII-only font; with the streamed bitmap font (see "Fonts") native å/ä/ö glyphs are now feasible almost for free (add them to `gen_font.py`'s charset + stop transliterating), but not yet done — a clean follow-up.
 
 ### Screen design
 
@@ -168,7 +179,7 @@ More content sources will join departures later: weather, and the owner's **Home
 
 ## Open questions
 
-- Is the scaled built-in font legible at real viewing distance, or are generated fonts needed sooner?
+- Is the streamed Bitter font legible/comfortable at real viewing distance (host preview looks good; owner to eyeball on the panel)? Are the three chosen sizes right?
 - Does the ~5 mm content margin read comfortably in person (currently reasoned from an approximate dot pitch)?
 - Is ~1×/min panel refresh the right wear/freshness trade-off, or should it relax? Is `full_refresh_interval_min=30` right given how little the differential ghosts in practice?
 - If ghosting ever appears on the partial refresh, flip `partial_old` polarity (see "Screen refresh strategy").
