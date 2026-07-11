@@ -287,12 +287,12 @@ async def display_loop(cfg):
             full = full_due or prev_sections is None
             print("display_loop: content changed, %s refresh" % ("full" if full else "partial"))
             _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full=full)
-            gc.collect()
             last_rendered = rendered_key
             prev_sections = sections
             prev_footer = footer
             if full:
                 last_full_refresh_ticks = now
+        gc.collect()
 
         # _sleep_until_next_tick feeds the WDT throughout the idle wait, so a
         # long fetch (~90s worst case) and the sleep are bounded separately,

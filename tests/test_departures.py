@@ -66,30 +66,14 @@ def test_parse_departures_transliterates_swedish_characters():
     assert deps[0]["destination"] == "Eknas"
 
 
-def test_format_line_layout():
-    dep = {"line": "430X", "destination": "Gustavsbergs centrum", "display": "5 min"}
-    line = departures.format_line(dep)
-    assert line.startswith("430X ")
-    assert "5 min" in line
-    # destination is truncated to 14 chars in the fixed-width row (default widths)
-    assert "Gustavsbergs c" in line
+def test_split_hero_display_minutes():
+    assert departures.split_hero_display("5 min") == ("5", "min")
+    assert departures.split_hero_display("12 min") == ("12", "min")
 
 
-def test_format_line_custom_widths():
-    dep = {"line": "430X", "destination": "Gustavsbergs centrum", "display": "16 min"}
-    line = departures.format_line(dep, line_w=3, dest_w=7, disp_w=5)
-    assert line == "430 Gustavs 16 mi"
+def test_split_hero_display_now():
+    assert departures.split_hero_display("Nu") == ("Nu", None)
 
 
-def test_format_caption_has_no_padding():
-    dep = {"line": "430X", "destination": "Slussen", "display": "5 min"}
-    caption = departures.format_caption(dep)
-    # no display field, no fixed-width padding (would break centering)
-    assert caption == "430X  Slussen"
-    assert "5 min" not in caption
-
-
-def test_format_caption_truncates_long_fields():
-    dep = {"line": "430X", "destination": "Gustavsbergs centrum", "display": "5 min"}
-    caption = departures.format_caption(dep, line_w=4, dest_w=20)
-    assert caption == "430X  Gustavsbergs centrum"
+def test_split_hero_display_clock_time():
+    assert departures.split_hero_display("12:34") == ("12:34", None)

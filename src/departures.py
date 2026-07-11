@@ -17,12 +17,28 @@ _ASCII_FALLBACK = (
 def _to_ascii(s):
     """framebuf's built-in font is ASCII-only; SL destination/stop names
     routinely contain Swedish a/a/o with diacritics, which otherwise draw
-    as corrupted glyphs (confirmed on real hardware for "Eknäs").
-    Transliterate to plain ASCII until custom fonts are generated (see
-    CLAUDE.md "Key library choices" -- declared, not yet built)."""
+    as corrupted glyphs (confirmed on real hardware for "Eknäs"). Custom
+    fonts that would support these natively are RAM-unviable on this
+    board (see CLAUDE.md "Key library choices" / "RAM-vs-HTTPS
+    conflict") -- transliterating to plain ASCII is the permanent fix,
+    not a stopgap."""
     for accented, plain in _ASCII_FALLBACK:
         s = s.replace(accented, plain)
     return s
+
+
+def split_hero_display(display):
+    """Split an SL `display` string into (main, unit) for the hero
+    treatment: the big countdown number rendered huge, with any trailing
+    unit word ("min") rendered smaller alongside it (see CLAUDE.md
+    "Screen design"). Only splits on a trailing alphabetic word -- "5
+    min" -> ("5", "min"), "Nu" -> ("Nu", None) (nothing to demote), "12:34"
+    -> ("12:34", None) (a clock time has no unit)."""
+    if " " in display:
+        main, _, unit = display.partition(" ")
+        if unit.isalpha():
+            return main, unit
+    return display, None
 
 
 def parse_departures(raw_json):
@@ -52,20 +68,3 @@ def parse_departures(raw_json):
     ]
     deps.sort(key=lambda d: d["expected"])
     return deps
-
-
-def format_line(dep, line_w=4, dest_w=14, disp_w=6):
-    """One fixed-width display row: "<line> <destination>  <display>".
-    Column widths are parameters so callers can request a narrower
-    version to fit a bigger font scale (see display.py)."""
-    fmt = "%%-%ds %%-%ds %%%ds" % (line_w, dest_w, disp_w)
-    return fmt % (dep["line"][:line_w], dep["destination"][:dest_w], dep["display"][:disp_w])
-
-
-def format_caption(dep, line_w=4, dest_w=20):
-    """"<line>  <destination>" with no trailing `display` field (shown
-    separately, huge, by the caller -- see display.py's hero treatment)
-    and deliberately no fixed-width padding: this gets centered on
-    screen, and trailing padding spaces would throw off that centering
-    math."""
-    return "%s  %s" % (dep["line"][:line_w], dep["destination"][:dest_w])

@@ -9,10 +9,11 @@ rem   e.g.    deploy.bat            (auto-detects the connected device)
 rem           deploy.bat COM5       (force a specific port)
 rem
 rem Copies everything under src\ (which maps 1:1 to the device filesystem root)
-rem plus src\lib\. The *.py / *.json globs only match files directly in those
-rem folders, so host CPython __pycache__\*.pyc junk is skipped automatically --
-rem no incremental/diff sync is needed (mpremote has none anyway); a full copy
-rem of ~13 small files takes a couple of seconds and is harmless to flash.
+rem plus src\lib\ (both .py and .mpy -- see that section below). The *.py /
+rem *.json globs only match files directly in those folders, so host
+rem CPython __pycache__\*.pyc junk is skipped automatically -- no incremental/
+rem diff sync is needed (mpremote has none anyway); a full copy of the handful
+rem of small files takes a couple of seconds and is harmless to flash.
 rem
 rem Close any open REPL / serial monitor first -- only one process can hold the
 rem COM port at a time.
