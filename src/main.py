@@ -43,6 +43,8 @@ import sl
 import departures
 import display
 import localtime
+import openmeteo
+import weather
 from epd7in5v2 import EPD7in5V2
 
 # `server` (Microdot) is deliberately NOT imported here -- server.py builds
@@ -61,8 +63,9 @@ WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_l
                              # socket-level timeout -- it can happen inside the handshake's own blocking
                              # crypto work, not a socket read, so no Python-level timeout can interrupt it.
                              # 150s gives headroom over the worst legitimate case with 2 configured stops
-                             # (2 stops x 3 retries x 15s timeout each = ~92s) -- if settings.json ever lists
-                             # more than ~3 stops, this may need raising.
+                             # (2 stops x 3 retries x 15s timeout each = ~92s, plus the weather fetch's
+                             # ~30s worst case = ~122s on the tick they coincide) -- if settings.json ever
+                             # lists more than ~3 stops, this may need raising.
 
 _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
                           # interval longer than the WDT window can't trip a spurious reboot during a normal wait
@@ -133,7 +136,7 @@ def _local_now_strings():
     return localtime.format_date(ly, lmo, ld), localtime.format_time(lh, lmi)
 
 
-def _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full):
+def _draw_and_refresh(epd, sections, footer, weather_now, prev_sections, prev_footer, prev_weather, full):
     """Allocates the 48KB framebuffer only for this draw+push window, then
     lets it be freed (no reference survives the function returning) --
     see module docstring for why it must not stay resident. Exactly ONE
@@ -161,7 +164,7 @@ def _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full):
     fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
 
     if full:
-        display.draw_home(fb, sections, footer)
+        display.draw_home(fb, sections, footer, weather_now)
         epd.init()
         epd.display(fb_buf)
         epd.sleep()
@@ -170,9 +173,9 @@ def _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full):
     # Differential partial: old plane (0x10) first, then new plane (0x13).
     epd.init_part()
     epd.partial_begin()
-    display.draw_home(fb, prev_sections, prev_footer)  # OLD frame -> 0x10
+    display.draw_home(fb, prev_sections, prev_footer, prev_weather)  # OLD frame -> 0x10
     epd.partial_old(fb_buf)
-    display.draw_home(fb, sections, footer)            # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
+    display.draw_home(fb, sections, footer, weather_now)             # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
     epd.partial_new(fb_buf)
     epd.sleep()
 
@@ -234,6 +237,19 @@ async def display_loop(cfg):
     prev_sections = None  # last-drawn frame, reused as the 0x10 old plane for the next partial
     prev_footer = None
 
+    # Optional today-weather footer (see CLAUDE.md "Screen design"). Absent
+    # or disabled -> the footer draws the clock only, exactly as before.
+    # Pulled on its own slow cadence (weather changes slowly; be gentle on
+    # the keyless Open-Meteo quota), independent of the departures pull.
+    weather_cfg = cfg.get("weather")
+    weather_enabled = bool(weather_cfg and weather_cfg.get("enabled", True)
+                           and weather_cfg.get("latitude") is not None
+                           and weather_cfg.get("longitude") is not None)
+    weather_pull_interval_s = (weather_cfg.get("pull_interval_min", 30) if weather_cfg else 30) * 60
+    last_weather_bucket = None
+    last_weather = None   # last-good weather summary; None -> no weather row
+    prev_weather = None   # weather on the last-drawn frame (the 0x10 old plane)
+
     while True:
         wdt.feed()
 
@@ -257,6 +273,26 @@ async def display_loop(cfg):
             stale = not all_ok
             last_pull_bucket = pull_bucket
 
+        # Weather on its own (much slower) wall-clock-aligned bucket. A
+        # failure or unusable payload keeps the last-good summary silently
+        # -- weather isn't gated by the departures "(stale)" flag. retries=2
+        # keeps this fetch's worst case (~30s) within the WDT budget.
+        if weather_enabled:
+            weather_bucket = int(time.time() // weather_pull_interval_s)
+            if weather_bucket != last_weather_bucket:
+                try:
+                    raw = openmeteo.fetch_today(
+                        weather_cfg["latitude"], weather_cfg["longitude"], retries=2)
+                    w = weather.parse_weather(raw)
+                    if w is not None:
+                        last_weather = w
+                        print("weather: " + weather.summary_text(w))
+                    else:
+                        print("weather: unusable payload, keeping last-good")
+                except Exception as e:
+                    print("weather: fetch failed, keeping last-good:", e)
+                last_weather_bucket = weather_bucket
+
         if not any(last_good):
             await _sleep_until_next_tick(wdt, render_interval_s)
             continue
@@ -267,7 +303,7 @@ async def display_loop(cfg):
         flat = []
         for section in sections:
             flat.extend(display.section_lines(section))
-        rendered_key = "\n".join(flat + footer)
+        rendered_key = "\n".join(flat + footer + [weather.summary_text(last_weather)])
 
         now = time.ticks_ms()
         full_due = (
@@ -286,10 +322,12 @@ async def display_loop(cfg):
         if content_changed:
             full = full_due or prev_sections is None
             print("display_loop: content changed, %s refresh" % ("full" if full else "partial"))
-            _draw_and_refresh(epd, sections, footer, prev_sections, prev_footer, full=full)
+            _draw_and_refresh(epd, sections, footer, last_weather,
+                              prev_sections, prev_footer, prev_weather, full=full)
             last_rendered = rendered_key
             prev_sections = sections
             prev_footer = footer
+            prev_weather = last_weather
             if full:
                 last_full_refresh_ticks = now
         gc.collect()

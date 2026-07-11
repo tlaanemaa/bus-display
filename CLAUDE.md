@@ -56,13 +56,15 @@ esptool --port COM3 --baud 460800 write-flash 0x1000 ESP32_GENERIC-<version>.bin
 Everyday loop:
 
 ```
-deploy.bat                                         # Windows: copy all of src/ to the device + reset (auto-detects port)
-mpremote connect COM3 fs cp src/main.py :main.py   # deploy one changed file (faster; prefer this)
+deploy.bat                                         # Windows: mpy-cross-compile every module + copy .mpy/main.py/json/fonts + reset
+mpremote connect COM3 fs cp src/main.py :main.py   # main.py only -- it ships as source; changed alone, cp it directly
 mpremote connect COM3 reset                        # restart so new code runs (cp does NOT restart)
 mpremote connect COM3 repl                         # serial console; Ctrl-] exits, Ctrl-C interrupts main.py
 mpremote connect COM3 run tools/foo.py             # run a host file on-device WITHOUT copying (hardware experiments)
 pytest                                             # host-side tests for the pure-logic modules
 ```
+
+**The whole app ships as precompiled `.mpy`, not source** (`deploy.bat` runs `mpy-cross` on every `.py`, then copies only the bytecode). This is load-bearing on this PSRAM-less board: on-device compilation fragments the heap and starves the TLS fetch — see "RAM-vs-HTTPS conflict". `main.py` is the ONE exception (MicroPython auto-runs `:main.py` by name; it's small enough to compile on-device with everything else precompiled). So a single-file quick-deploy works directly only for `main.py`; for any other module, recompile first (`python -m mpy_cross src/foo.py && mpremote connect COM3 fs cp src/foo.mpy :foo.mpy`) or just run `deploy.bat`. The `.mpy` are **gitignored build artifacts** — `.py` is the source of truth. Requires `pip install mpy-cross`.
 
 Only one process can hold the COM port — close any open REPL before deploying. `main.py` auto-runs on boot; keep it Ctrl-C-recoverable (catch exceptions, print, idle — never a tight reset loop, or the board becomes hard to reflash).
 
@@ -85,11 +87,14 @@ src/                 # maps 1:1 to the device filesystem root
   epd7in5v2.py       # panel driver (Waveshare port, pins above)
   sl.py              # thin HTTPS wrapper: fetch departures JSON
   departures.py      # PURE parse/filter/format — no hardware imports
+  openmeteo.py       # thin HTTPS wrapper: fetch Open-Meteo forecast JSON
+  weather.py         # PURE: forecast JSON -> footer summary + glyph bucket
   localtime.py       # PURE UTC->Stockholm CET/CEST converter
   lib/               # vendored (microdot.mpy) — don't hand-edit
 tests/               # pytest on host CPython
 tools/               # host-side scripts (bring-up, one-off experiments)
-                     #   gen_font.py: TTF -> .fnt; diag_mem.py: RAM probe
+                     #   gen_font.py: TTF -> .fnt; diag_mem.py: RAM probe;
+                     #   preview_home.py / preview_weather.py: host PNG previews
 ```
 
 **Testability rule**: anything pure (parsing, filtering, formatting, layout/time math) goes in modules with no `machine`/`network`/`requests` top-level imports, so it runs under host pytest. Hardware and network stay in thin adapters. On-device behavior is verified by eye — this is the only automated testing.
@@ -101,7 +106,7 @@ tools/               # host-side scripts (bring-up, one-off experiments)
 Print-like **Bitter** (slab serif; robust at 1-bit, strong hero digits) rendered on the host into compact 1-bit `.fnt` files and **streamed from flash one glyph at a time** — never resident. This is what makes a smooth font viable on this PSRAM-less board. The panel is 1-bit (no anti-aliasing), so smoothness comes purely from rendering glyphs at their real pixel size, not scaling an 8×8 cell.
 
 - **Three sizes** (fixed px, not the old arbitrary scale): `bitter_hero.fnt` (~87 px countdown, weight 800), `bitter_head.fnt` (~35 px labels/headline, 700), `bitter_row.fnt` (~27 px rows/footer, 500). Total ~26 KB flash, **zero resident glyph data**.
-- **Format + regen**: `tools/gen_font.py` (host, Pillow) renders `tools/fonts/Bitter-var.ttf` → `src/fonts/*.fnt` (advance-width cells, on-disk index, ink-cropped; format documented in that file). `bitfont.py` is its exact reader. Charset = printable ASCII (Swedish is transliterated upstream by `_to_ascii`). Deploy `bitfont.mpy` (precompiled) so import doesn't compile-fragment the heap.
+- **Format + regen**: `tools/gen_font.py` (host, Pillow) renders `tools/fonts/Bitter-var.ttf` → `src/fonts/*.fnt` (advance-width cells, on-disk index, ink-cropped; format documented in that file). `bitfont.py` is its exact reader. Charset = printable ASCII **+ `°` (U+00B0)** for the weather temps (head/row fonts; hero stays digits-only) — Swedish is transliterated to ASCII upstream by `_to_ascii`. Any new non-ASCII glyph must also be added to `display.warm_fonts()`, or it allocates mid-draw (see RAM discipline). Deploy `bitfont.mpy` (precompiled) so import doesn't compile-fragment the heap.
 - **RAM discipline is load-bearing (see bitfont.py docstring)** — this is a *second* front of the same RAM-vs-HTTPS conflict. mbedtls's SL handshake needs a large *contiguous* block, and ANY heap churn during a draw (while the 48 KB framebuffer is alive) can strand an object into it and starve the next fetch → `MBEDTLS_ERR_MPI_ALLOC_FAILED`. An early version that did (per-glyph `bytes` reads, per-call lambda closures, lazy cache growth) fetched fine on the *first* cycle then went stale on every one after the first draw — confirmed on hardware. The fix, all three needed: (1) one module-level scratch buffer reused via `readinto` (no per-glyph alloc); (2) a module-level `plot` function + inlined transform (no per-run tuple / per-call closure); (3) **pre-warm the advance caches at boot** via `display.warm_fonts()` before the loop, so nothing font-related is allocated during a live draw. With these, the freed framebuffer region returns to its clean post-fetch state each cycle and fetches stay reliable (verified: 3 boots + a 280 s run, zero failures). **Do not reintroduce per-draw allocations in the render path.**
 
 ## SL Transport API (verified 2026-07)
@@ -111,6 +116,13 @@ Print-like **Bitter** (slab serif; robust at 1-bit, strong hero digits) rendered
 - siteId: `GET /v1/sites` is ~MB-sized — fetch on the **host** (curl/browser), never on the device. SL siteIds differ from the old Stop Lookup API ids.
 - Host test: `curl "https://transport.integration.sl.se/v1/sites/9192/departures?transport=BUS&forecast=60"` (9192 = Slussen).
 - No key = shared fair-use quota — poll ~1×/min, don't hammer. Docs: https://www.trafiklab.se/api/our-apis/sl/transport/
+
+## Weather API (Open-Meteo — settled 2026-07-12)
+
+- Today's forecast: `GET https://api.open-meteo.com/v1/forecast?latitude=..&longitude=..&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=1` — **no API key**, like SL. `openmeteo.py` fetches, `weather.py` parses (pure).
+- **Open-Meteo, not SMHI, on purpose**: SMHI's point forecast returns the whole multi-day hourly series (100 KB+), reopening the RAM-vs-HTTPS fight; Open-Meteo lets us request **only today's daily fields → ~1 KB**. `timezone=auto` so the daily min/max aggregate over the LOCAL day.
+- **WMO `weather_code` → glyph bucket** in `weather.condition_for_code()`: clear/partly/cloudy/fog, **drizzle/rain/rain_heavy** (rain split three ways — intensity is the umbrella-decision axis, and WMO carries it: 51/53/55 drizzle, 61/63/80/81 rain, 65/82/99 heavy), snow, thunder. Unknown → cloudy.
+- Coords + cadence live in `/settings.json`'s optional `weather` block (see settings.example.json); absent/`enabled:false` → the footer draws the clock only. Pulled on its own slow bucket (`pull_interval_min`, default 30 — weather changes slowly, be gentle on the keyless quota), independent of the departures pull. Fetch failure keeps last-good silently (not gated by the departures `(stale)` flag). retries=2 keeps its worst case (~30 s) inside the WDT budget.
 
 ## Departures logic & stops
 
@@ -136,7 +148,8 @@ Print-like **Bitter** (slab serif; robust at 1-bit, strong hero digits) rendered
 
 - **Per-stop sections**, each labeled with the stop name (`display.stop_section()`), separated by a thick rule (`RULE_HEIGHT=3`) + a generous gap (`GROUP_GAP=34`). An internal divider, not the banned around-the-screen border.
 - **Hero + caption**: each stop's soonest departure's `display` string is drawn alone, huge (`HERO_SCALE=7`, centered) — it answers the one question at a glance. A caption under it (`CAPTION_SCALE=2`, centered, `<line>  <destination>`, no padding — padding would break the centering) names the bus. Remaining departures are a compact left-aligned list (`ROW_SCALE=2`, 3-column line/destination/display).
-- **Footer** (`FOOTER_SCALE=2`, centered, own `FOOTER_MARGIN=12` so it sits lower than the 25 px content margin): shows only the current local date/time, plus a `(stale)` suffix when the last cycle didn't refresh every stop. ("Last updated" was removed — identical to "now" at this cadence.) Local time from NTP UTC via `localtime.py`, a pure CET/CEST converter (Sakamoto day-of-week, hand-rolled calendar rollover; avoids `datetime`/`time.localtime` for host/device portability; tests in `tests/test_localtime.py`).
+- **Footer** (centered, own `FOOTER_MARGIN` so it sits lower than the content margin): the current local date/time, plus a `(stale)` suffix when the last cycle didn't refresh every stop. ("Last updated" was removed — identical to "now" at this cadence.) Local time from NTP UTC via `localtime.py`, a pure CET/CEST converter (Sakamoto day-of-week, hand-rolled calendar rollover; avoids `datetime`/`time.localtime` for host/device portability; tests in `tests/test_localtime.py`).
+- **Weather row** (above the clock, part of the footer band; `display._draw_weather_row`): today's condition **glyph** + high/low (`6° / 12°`, low first — the jacket number) + a droplet + rain chance, shown only when precip ≥ `weather.PRECIP_SHOW_THRESHOLD` (20 %; the icon already says "dry"). Answers "umbrella? jacket?" at a glance — the design intent, not a full weather report. Glyphs are **procedural 1-bit icons** drawn straight through the mount transform, integer-math + `_plot_run` only (allocation-free, same RAM discipline as the font path — see "Fonts"); dispatched by condition string in `display._WEATHER_DRAWERS` (keys match `weather.py`). Preview them on host with `tools/preview_weather.py`.
 - **Content margin**: `CONTENT_MARGIN=25` px (~5 mm) inset within the calibrated safe rectangle, on all four sides except the footer's bottom (`display.py`'s `CONTENT_X0/Y0/W/H`). A styling choice, separate from the hardware crop margins.
 - **Set aside**: merging all stops into one time-sorted feed (rejected — owner wants clear per-stop sections); mixed font scales within the hero line (not built, marginal gain).
 
@@ -164,7 +177,7 @@ Mitigations that help but aren't sufficient alone: a 3 s settle after Wi-Fi conn
 - `requests`/`urequests`: always `resp.close()` in `finally:`, `gc.collect()` before each fetch. HTTPS works; certs unvalidated by default (fine here).
 - A JSON parse needs ~2–3× the response size in free RAM. If fetches start failing with `MemoryError`, shrink `forecast`/filters first.
 - Handle Wi-Fi drops: catch exceptions, keep the last-good data on screen with a stale flag, let a reconnect recover. Never let one failed request crash the program.
-- **Vendor large deps as precompiled `.mpy`, not raw `.py`.** Deploying `microdot.py` (58 KB) then bringing up Wi-Fi threw `OSError: WiFi Out of Memory` — compiling a big `.py` *on device* spikes transient RAM (parser/AST), fragmenting the heap so the Wi-Fi driver's own alloc fails, even though `gc.mem_free()` looks fine again afterward. Fix: `python -m mpy_cross -o src/lib/microdot.mpy src/lib/microdot.py`, deploy the `.mpy` (58 KB → 12 KB; imports resolve either extension transparently). Keeping both files is safe (MicroPython prefers `.mpy`). PyPI's `mpy-cross` (1.27.0) lags the firmware (1.28.0) but the bytecode format matches as of 2026-07 — if a future `.mpy` fails to import with a version error, check this first.
+- **The whole app ships as precompiled `.mpy` (`deploy.bat` compiles every `.py` but `main.py`), because on-device compilation fragments the heap and starves the TLS fetch.** First seen vendoring `microdot.py` (58 KB): compiling it *on device* threw `OSError: WiFi Out of Memory` (parser/AST spikes transient RAM, fragmenting the heap so the Wi-Fi driver's alloc fails). Confirmed again adding weather (2026-07-12): the extra resident bytecode from `display`/`weather`/`openmeteo` collapsed the largest *contiguous* free block to ~7 KB (32 KB tail split) and the **first SL fetch hung every boot** (WDT reboot at 158 s, deterministically — not the usual intermittent blip). `gc.mem_free()` looked fine (~105 KB) — total free isn't the metric; **contiguous is** (`micropython.mem_info()` → "max new split" / "max free sz"). Precompiling all modules restored the contiguous block to ~90 KB and the fetch succeeded immediately. So: compile on the host, never the device. PyPI's `mpy-cross` (1.27.0) lags the firmware (1.28.0) but the bytecode matches as of 2026-07 — if a future `.mpy` fails to import with a version error, check this first.
 
 ## Working conventions
 
@@ -175,7 +188,7 @@ Mitigations that help but aren't sufficient alone: a 3 s settle after Wi-Fi conn
 
 ## Future direction (declared by owner — do NOT build yet, but don't design against it)
 
-More content sources will join departures later: weather, and the owner's **Homey Pro** hub (same Wi-Fi, local API). Today: treat "fetch data → render a screen region" as a repeatable pattern (SL is #1), keep `display.py` sectioned rather than whole-screen-hardcoded, and remember each source costs RAM (the Hardware budget is the ceiling). Don't add abstraction layers yet — just don't bake departures-only assumptions into `display.py`/the fetch task.
+Weather is now built (footer overview — see "Weather API" and "Screen design"), the **second** data source after SL and proof the "fetch data → render a screen region" pattern holds. Still to come: the owner's **Homey Pro** hub (same Wi-Fi, local API). Keep `display.py` sectioned rather than whole-screen-hardcoded, and remember each source costs RAM (the Hardware budget is the ceiling) and a slice of the WDT fetch budget. Don't add abstraction layers yet — just don't bake departures-only assumptions into `display.py`/the fetch task.
 
 ## Open questions
 
@@ -185,4 +198,5 @@ More content sources will join departures later: weather, and the owner's **Home
 - If ghosting ever appears on the partial refresh, flip `partial_old` polarity (see "Screen refresh strategy").
 - Power: USB assumed; ESP32 deep sleep set aside (would break the differential's `prev_sections`/`prev_footer` and need the previous frame persisted to survive sleep — only worth it on battery). The panel already deep-sleeps between refreshes.
 - Does the admin panel return once connected in STA mode, and scoped to what (maybe just Wi-Fi re-provisioning)?
-- When/how weather + Homey Pro sources get added (see Future direction).
+- **Weather (new 2026-07-12)**: are the procedural glyphs legible on the panel at viewing distance (host preview looks good; owner to eyeball)? Is the three-way rain split the right resolution, or is drizzle-vs-rain-vs-heavy overkill? Is `pull_interval_min=30` right? Owner must add real `latitude`/`longitude` to `/settings.json`'s `weather` block (example uses Stockholm 59.33/18.06).
+- When/how the Homey Pro source gets added (see Future direction).

@@ -44,8 +44,11 @@ IDX = struct.Struct("<HBBI")
 
 # Printable ASCII. departures._to_ascii transliterates Swedish a/a/o/e/u
 # to plain ASCII upstream, so this covers every character the screen can
-# draw. Space (0x20) included: it has no ink but a real advance.
-DEFAULT_CHARSET = "".join(chr(c) for c in range(0x20, 0x7F))
+# draw. Space (0x20) included: it has no ink but a real advance. Plus the
+# degree sign (U+00B0), needed for the weather footer's temperatures --
+# outside ASCII, so it's appended explicitly here (and to weather.py's
+# format strings).
+DEFAULT_CHARSET = "".join(chr(c) for c in range(0x20, 0x7F)) + "°"
 
 THRESHOLD = 128  # grayscale coverage >= this becomes a black pixel
 

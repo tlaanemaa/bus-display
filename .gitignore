@@ -228,3 +228,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Compiled MicroPython bytecode -- build artifacts. deploy.bat regenerates
+# every .mpy from the .py via mpy-cross on each deploy (the whole app ships as
+# bytecode; on-device compilation fragments the heap and starves the TLS fetch
+# -- see CLAUDE.md "RAM-vs-HTTPS conflict"). The .py is the source of truth, so
+# the .mpy are not committed -- they'd only go stale and add diff noise.
+src/*.mpy
+src/lib/*.mpy
+
+# Host-generated preview renders (tools/preview_*.py output) -- regenerate on demand.
+tools/_preview_*.png

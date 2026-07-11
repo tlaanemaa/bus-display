@@ -8,13 +8,15 @@ rem   Usage:  deploy.bat [COM_PORT]
 rem   e.g.    deploy.bat            (auto-detects the connected device)
 rem           deploy.bat COM5       (force a specific port)
 rem
-rem Copies everything under src\ (which maps 1:1 to the device filesystem root)
-rem plus src\lib\ (both .py and .mpy -- see that section below). The *.py /
-rem *.json globs only match files directly in those folders, so host
-rem CPython __pycache__\*.pyc junk is skipped automatically -- no incremental/
-rem diff sync is needed (mpremote has none anyway); a full copy of the handful
-rem of small files takes a couple of seconds and is harmless to flash.
+rem COMPILES every module to .mpy on the host (mpy-cross), then copies the
+rem bytecode + main.py + settings.json + fonts to the device (src\ maps 1:1 to
+rem the device filesystem root). Compiling on the host, not the device, is
+rem load-bearing on this PSRAM-less board -- on-device compilation fragments
+rem the heap and starves the TLS fetch (see the compile section below and
+rem CLAUDE.md "RAM-vs-HTTPS conflict"). A full copy of the handful of small
+rem files takes a couple of seconds and is harmless to flash.
 rem
+rem Requires mpy-cross:  pip install mpy-cross
 rem Close any open REPL / serial monitor first -- only one process can hold the
 rem COM port at a time.
 rem ===========================================================================
@@ -45,16 +47,38 @@ if not exist "%SRCDIR%\settings.json" (
     echo.
 )
 
+rem --- precompile EVERY module to .mpy on the host BEFORE copying ----------
+rem The whole app ships as bytecode, not source. Compiling a .py ON THE DEVICE
+rem fragments the heap enough to starve the SL/weather TLS handshake -- the
+rem largest contiguous free block collapses (confirmed on hardware adding
+rem weather: the first fetch hung every boot until these were precompiled; the
+rem contiguous free block jumped ~32KB -> ~90KB -- see CLAUDE.md "RAM-vs-HTTPS
+rem conflict"). Doing it here means an edit to any .py can NEVER ship as a
+rem stale .mpy, and the device never compiles anything but main.py. Needs
+rem mpy-cross (pip install mpy-cross).
+rem
+rem main.py is the ONE exception -- MicroPython auto-runs :main.py by name (no
+rem main.mpy is ever run), so it ships as source and is compiled on-device.
+rem It's small; with everything else precompiled there's ample contiguous RAM.
+for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
+    if /I not "%%~nxF"=="main.py" (
+        echo   compile %%~nF.mpy
+        python -m mpy_cross "%%F"
+        if errorlevel 1 (
+            echo ERROR: mpy-cross failed for %%~nxF -- is mpy-cross installed?  pip install mpy-cross
+            goto :fail
+        )
+    )
+)
+
 echo Deploying to %PORTDESC% ...
 
-rem --- top-level files: config, drivers, app modules, settings -------------
-rem settings.example.json is a repo-only template -- the device only needs the
-rem real settings.json, so skip the example to keep the device clean.
-rem *.mpy included so precompiled top-level modules (bitfont.mpy) deploy too;
-rem MicroPython prefers the .mpy over the same-named .py, and shipping .mpy
-rem avoids the on-device compile that spikes/fragments RAM (see CLAUDE.md
-rem gotchas -- the same reason microdot is vendored as .mpy).
-for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
+rem --- top-level files: main.py (source), the compiled modules, settings ---
+rem Only the .mpy go to the device -- NOT the .py (except main.py). Shipping
+rem the source too would be inert dead flash (MicroPython always prefers the
+rem .mpy) and just invites confusion about which one runs. settings.example.json
+rem is a repo-only template -- the device needs the real settings.json only.
+for %%F in ("%SRCDIR%\main.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
     if /I not "%%~nxF"=="settings.example.json" (
         echo   cp %%~nxF
         %MP% %CONN% fs cp "%%F" ":%%~nxF"
@@ -63,10 +87,9 @@ for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
 )
 
 rem --- vendored libraries (src\lib\ -> :lib) --------------------------------
-rem Both microdot.py (source) and microdot.mpy (bytecode) get copied; MicroPython
-rem prefers the .mpy and ignores the .py, so the .py is just inert extra flash.
+rem Compiled above alongside our own modules; only the .mpy ships.
 %MP% %CONN% fs mkdir :lib >nul 2>nul
-for %%F in ("%SRCDIR%\lib\*.py" "%SRCDIR%\lib\*.mpy") do (
+for %%F in ("%SRCDIR%\lib\*.mpy") do (
     echo   cp lib/%%~nxF
     %MP% %CONN% fs cp "%%F" ":lib/%%~nxF"
     if errorlevel 1 goto :fail

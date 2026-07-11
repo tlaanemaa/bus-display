@@ -63,9 +63,10 @@ def main():
             ("471", "Gustavsberg centrum", "Nu"), ("474", "Slussen", "16 min"), ("469", "Alstaket", "24 min"))),
     ]
     footer = display.footer_lines("Fri 11 Jul", "23:41")
+    weather = {"condition": "rain", "tmin": 6, "tmax": 12, "precip": 60}
 
     fb = ImgFB(display.PHYS_W, display.PHYS_H)
-    content_bottom, footer_top = display.draw_home(fb, sections, footer)
+    content_bottom, footer_top = display.draw_home(fb, sections, footer, weather)
     print("content_bottom=%d footer_top=%d (fits=%s)" % (
         content_bottom, footer_top, content_bottom <= footer_top))
 

@@ -8,5 +8,11 @@
   "departures_per_stop": 3,
   "data_pull_interval_min": 1,
   "render_interval_min": 1,
-  "full_refresh_interval_min": 30
+  "full_refresh_interval_min": 30,
+  "weather": {
+    "enabled": true,
+    "latitude": 59.33,
+    "longitude": 18.06,
+    "pull_interval_min": 30
+  }
 }

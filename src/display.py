@@ -76,6 +76,15 @@ BADGE_PAD_X_ROW, BADGE_PAD_Y_ROW = 6, 3
 GAP_BADGE_DEST = 14   # gap between a route badge and the destination text after it
 GAP_DEST_TIME = 10    # gap between a row's destination and its right-aligned time
 
+# Footer weather row (drawn above the clock line -- see draw_home / the
+# weather glyphs above). The icon box is a touch taller than the temps so
+# it reads as the anchor of the row.
+WEATHER_ICON_PAD = 6      # icon box height = head font height + this
+GAP_WEATHER_ICON = 12     # icon -> temperature
+GAP_TEMP_PRECIP = 18      # temperature -> precip cue
+GAP_DROP_PRECIP = 6       # droplet -> its percentage
+GAP_WEATHER_CLOCK = 10    # weather row -> clock line below it
+
 
 # --- fonts: streamed from flash, opened lazily on first use (never at
 # import -- keeps the eager-import RAM discipline, CLAUDE.md). Cached so
@@ -109,9 +118,12 @@ def warm_fonts():
     would strand objects into the region the next SL TLS handshake needs
     (CLAUDE.md "RAM-vs-HTTPS conflict"; bitfont.py module docstring)."""
     f = _fonts()
-    ascii_all = "".join(chr(c) for c in range(0x20, 0x7F))
-    f["head"].warm(ascii_all)
-    f["row"].warm(ascii_all)
+    # Printable ASCII + the degree sign (weather temps) -- any char measured
+    # or drawn without being warmed here would open the font file mid-draw,
+    # allocating into the live-framebuffer region (see bitfont.py docstring).
+    head_row = "".join(chr(c) for c in range(0x20, 0x7F)) + "°"
+    f["head"].warm(head_row)
+    f["row"].warm(head_row)
     f["hero"].warm("0123456789:Nu ")
 
 
@@ -185,6 +197,200 @@ def _badge(fb, font, s, lx0, ly0, pad_x, pad_y, radius=True):
     return bw, bh
 
 
+# --- weather glyphs: small procedural 1-bit icons drawn straight through
+# the 90deg mount transform, ALLOCATION-FREE (integer math + the
+# module-level _plot_run only -- no tuples, floats, or closures per draw).
+# They run inside the live-framebuffer draw window, so they obey the same
+# no-heap-churn discipline as the streamed font path (see bitfont.py): any
+# object stranded while the 48KB buffer is alive can starve the next SL TLS
+# handshake. Condition strings match weather.py's constants (loose coupling
+# by string, kept in sync there). Each drawer fills a square (x, y, s, s)
+# logical box; s is tuned to sit on the footer next to the temperature.
+
+def _box(fb, lx, ly, lw, lh, color):
+    """Filled logical rect via per-row _plot_run -- allocation-free, unlike
+    _fill_rect (which builds a tuple). For the glyph drawers only."""
+    if lw <= 0 or lh <= 0:
+        return
+    for i in range(lh):
+        _plot_run(fb, lx, ly + i, lw, color)
+
+
+def _disc(fb, cx, cy, r, color):
+    """Filled circle by integer scanline (no float, no alloc): each row's
+    half-width is the largest dx with dx*dx + dy*dy <= r*r."""
+    rr = r * r
+    dy = -r
+    while dy <= r:
+        dx = 0
+        while (dx + 1) * (dx + 1) + dy * dy <= rr:
+            dx += 1
+        _plot_run(fb, cx - dx, cy + dy, 2 * dx + 1, color)
+        dy += 1
+
+
+def _seg(fb, x0, y0, x1, y1, t, color):
+    """Thick short segment as a run of t-by-t boxes stepped along the line
+    (integer Lerp; fine for the few px these glyphs need)."""
+    dx = x1 - x0
+    dy = y1 - y0
+    steps = abs(dx) if abs(dx) > abs(dy) else abs(dy)
+    if steps < 1:
+        steps = 1
+    h = t // 2
+    for i in range(steps + 1):
+        px = x0 + dx * i // steps
+        py = y0 + dy * i // steps
+        _box(fb, px - h, py - h, t, t, color)
+
+
+def _cloud(fb, x, y, w, h, color):
+    """Lumpy cloud with a flattish bottom: three bumps (discs) over a base
+    slab, all bottoms landing on one line so the underside reads straight."""
+    bottom = y + (h * 82) // 100
+    rL = (h * 26) // 100
+    rC = (h * 34) // 100
+    rR = (h * 28) // 100
+    cxL = x + (w * 32) // 100
+    cxC = x + (w * 52) // 100
+    cxR = x + (w * 72) // 100
+    _disc(fb, cxL, bottom - rL, rL, color)
+    _disc(fb, cxC, bottom - rC, rC, color)
+    _disc(fb, cxR, bottom - rR, rR, color)
+    slab_top = bottom - rL
+    _box(fb, cxL, slab_top, cxR - cxL, bottom - slab_top, color)
+
+
+def _draw_sun(fb, x, y, s, color=1):
+    cx = x + s // 2
+    cy = y + s // 2
+    r = (s * 24) // 100
+    _disc(fb, cx, cy, r, color)
+    t = max(2, (s * 8) // 100)
+    r1 = r + (s * 9) // 100
+    r2 = r + (s * 22) // 100
+    d1 = (r1 * 7) // 10
+    d2 = (r2 * 7) // 10
+    _seg(fb, cx + r1, cy, cx + r2, cy, t, color)
+    _seg(fb, cx - r1, cy, cx - r2, cy, t, color)
+    _seg(fb, cx, cy + r1, cx, cy + r2, t, color)
+    _seg(fb, cx, cy - r1, cx, cy - r2, t, color)
+    _seg(fb, cx + d1, cy + d1, cx + d2, cy + d2, t, color)
+    _seg(fb, cx + d1, cy - d1, cx + d2, cy - d2, t, color)
+    _seg(fb, cx - d1, cy + d1, cx - d2, cy + d2, t, color)
+    _seg(fb, cx - d1, cy - d1, cx - d2, cy - d2, t, color)
+
+
+def _draw_partly(fb, x, y, s, color=1):
+    _draw_sun(fb, x - (s * 4) // 100, y - (s * 10) // 100, (s * 60) // 100, color)
+    _cloud(fb, x + (s * 18) // 100, y + (s * 30) // 100, (s * 82) // 100, (s * 60) // 100, color)
+
+
+def _draw_cloudy(fb, x, y, s, color=1):
+    _cloud(fb, x, y + (s * 8) // 100, s, (s * 78) // 100, color)
+
+
+def _draw_fog(fb, x, y, s, color=1):
+    _cloud(fb, x, y - (s * 6) // 100, s, (s * 58) // 100, color)
+    t = max(2, (s * 7) // 100)
+    for i, fy in enumerate((66, 82, 98)):
+        yy = y + (s * fy) // 100
+        inset = (s * (10 + 8 * (i % 2))) // 100
+        _box(fb, x + inset, yy, s - 2 * inset, t, color)
+
+
+def _draw_drizzle(fb, x, y, s, color=1):
+    """Light rain: a scatter of small dots -- reads as spitting/drizzle,
+    clearly lighter than the streaks of _draw_rain."""
+    _cloud(fb, x, y, s, (s * 62) // 100, color)
+    r = max(1, (s * 4) // 100)
+    for fx, fy in ((30, 74), (52, 74), (72, 74), (40, 92), (62, 92)):
+        _disc(fb, x + (s * fx) // 100, y + (s * fy) // 100, r, color)
+
+
+def _draw_rain(fb, x, y, s, color=1):
+    _cloud(fb, x, y, s, (s * 62) // 100, color)
+    t = max(2, (s * 7) // 100)
+    top = y + (s * 66) // 100
+    bot = y + (s * 96) // 100
+    for fx in (30, 50, 70):
+        sx = x + (s * fx) // 100
+        _seg(fb, sx, top, sx - (s * 9) // 100, bot, t, color)
+
+
+def _draw_rain_heavy(fb, x, y, s, color=1):
+    """Heavy rain: four longer, thicker streaks packed tighter -- the
+    'bucketing down, take the umbrella' state."""
+    _cloud(fb, x, y, s, (s * 60) // 100, color)
+    t = max(3, (s * 9) // 100)
+    top = y + (s * 62) // 100
+    bot = y + (s * 100) // 100
+    for fx in (24, 42, 60, 78):
+        sx = x + (s * fx) // 100
+        _seg(fb, sx, top, sx - (s * 11) // 100, bot, t, color)
+
+
+def _draw_snow(fb, x, y, s, color=1):
+    _cloud(fb, x, y, s, (s * 62) // 100, color)
+    t = max(2, (s * 4) // 100)   # thin arms so the star stays open, not a blob
+    a = (s * 7) // 100
+    for fx in (24, 50, 76):      # wide spacing -> three distinct flakes
+        cx = x + (s * fx) // 100
+        cy = y + (s * 82) // 100
+        _seg(fb, cx - a, cy, cx + a, cy, t, color)
+        _seg(fb, cx, cy - a, cx, cy + a, t, color)
+        _seg(fb, cx - a, cy - a, cx + a, cy + a, t, color)
+        _seg(fb, cx - a, cy + a, cx + a, cy - a, t, color)
+
+
+def _draw_thunder(fb, x, y, s, color=1):
+    _cloud(fb, x, y, s, (s * 62) // 100, color)
+    t = max(3, (s * 9) // 100)
+    x0 = x + (s * 56) // 100
+    y0 = y + (s * 62) // 100
+    xm = x + (s * 40) // 100
+    ym = y + (s * 82) // 100
+    x1 = x + (s * 58) // 100
+    y1 = y + (s * 82) // 100
+    x2 = x + (s * 38) // 100
+    y2 = y + (s * 100) // 100
+    _seg(fb, x0, y0, xm, ym, t, color)
+    _seg(fb, xm, ym, x1, y1, t, color)
+    _seg(fb, x1, y1, x2, y2, t, color)
+
+
+def _draw_drop(fb, x, y, s, color=1):
+    """Small teardrop for the precipitation cue: a round belly with the
+    point well ABOVE it (a smaller disc set low so the taper stays visible)."""
+    r = (s * 34) // 100
+    cx = x + s // 2
+    cy = y + s - r
+    _disc(fb, cx, cy, r, color)
+    h = cy - y
+    for i in range(h):
+        half = (r * i) // h
+        _plot_run(fb, cx - half, y + i, 2 * half + 1, color)
+
+
+_WEATHER_DRAWERS = {
+    "clear": _draw_sun,
+    "partly": _draw_partly,
+    "cloudy": _draw_cloudy,
+    "fog": _draw_fog,
+    "drizzle": _draw_drizzle,
+    "rain": _draw_rain,
+    "rain_heavy": _draw_rain_heavy,
+    "snow": _draw_snow,
+    "thunder": _draw_thunder,
+}
+
+
+def draw_weather_glyph(fb, condition, x, y, s, color=1):
+    """Draw the icon for a weather condition string (weather.py's
+    constants) in the (x, y, s, s) logical box. Unknown -> cloudy."""
+    _WEATHER_DRAWERS.get(condition, _draw_cloudy)(fb, x, y, s, color)
+
+
 def stop_section(name, deps):
     """Pure: content for one stop's section (no drawing) -- the hero
     departure split into (main, unit) for the two-size hero treatment,
@@ -249,7 +455,43 @@ def footer_lines(date_str, time_str, stale=False):
     return [date_str, line2]
 
 
-def draw_home(fb, sections, footer):
+def _weather_row_height():
+    return _fonts()["head"].height + WEATHER_ICON_PAD
+
+
+def _draw_weather_row(fb, weather, ly):
+    """Draw the centered "today" weather row at logical y `ly`: condition
+    icon + high/low temperature, plus a droplet + precipitation-chance cue
+    when it's high enough to matter (weather.format_precip). All one
+    centered group, vertically centered on the icon-box height. weather is
+    the dict from weather.parse_weather()."""
+    import weather as wx  # pure module (no hardware imports); lazy like departures
+    head_f = _fonts()["head"]
+    row_f = _fonts()["row"]
+    wi = _weather_row_height()
+
+    temps = wx.format_temps(weather)
+    precip = wx.format_precip(weather)
+    tw = head_f.measure(temps)
+    total = wi + GAP_WEATHER_ICON + tw
+    if precip:
+        pw = row_f.measure(precip)
+        total += GAP_TEMP_PRECIP + wi // 2 + GAP_DROP_PRECIP + pw
+
+    x = CONTENT_X0 + max(0, (CONTENT_W - total) // 2)
+    draw_weather_glyph(fb, weather["condition"], x, ly, wi)
+    x += wi + GAP_WEATHER_ICON
+    _text(fb, head_f, temps, x, ly + (wi - head_f.height) // 2)
+    x += tw
+    if precip:
+        x += GAP_TEMP_PRECIP
+        dw = wi // 2
+        _draw_drop(fb, x, ly + (wi - dw) // 2, dw)
+        x += dw + GAP_DROP_PRECIP
+        _text(fb, row_f, precip, x, ly + (wi - row_f.height) // 2)
+
+
+def draw_home(fb, sections, footer, weather=None):
     """Draws each stop's section (from stop_section()) top-to-bottom, in
     order, with a divider between sections, then footer (from
     footer_lines()) anchored near the bottom of the drawable area with
@@ -309,14 +551,22 @@ def draw_home(fb, sections, footer):
 
     content_bottom = y  # logical y just past the last section, before the footer
 
-    footer_h = len(footer) * row_f.height + max(0, len(footer) - 1) * GAP_ROW
-    footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - footer_h
+    # Footer band, bottom-anchored: an optional weather row sits above the
+    # clock line(s), both inside the same band (see _draw_weather_row).
+    text_h = len(footer) * row_f.height + max(0, len(footer) - 1) * GAP_ROW
+    weather_h = (_weather_row_height() + GAP_WEATHER_CLOCK) if weather else 0
+    footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - text_h - weather_h
     fy = footer_top
+    if weather:
+        _draw_weather_row(fb, weather, fy)
+        fy += _weather_row_height() + GAP_WEATHER_CLOCK
     for line in footer:
         _text_centered(fb, row_f, line, fy)
         fy += row_f.height + GAP_ROW
 
-    print("display: home screen -- " + " | ".join(logged) + " || " + " | ".join(footer))
+    import weather as wx
+    print("display: home screen -- " + " | ".join(logged) + " || "
+          + " | ".join(footer) + " || " + wx.summary_text(weather))
     # Returned so callers/tests can assert content didn't run into the footer
     # band (the FakeFB in tests only guards the physical buffer bounds).
     return content_bottom, footer_top

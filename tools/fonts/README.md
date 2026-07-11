@@ -18,4 +18,8 @@ this TTF with `tools/gen_font.py`:
     python tools/gen_font.py tools/fonts/Bitter-var.ttf src/fonts/bitter_head.fnt --size 31  --weight 700
     python tools/gen_font.py tools/fonts/Bitter-var.ttf src/fonts/bitter_row.fnt  --size 23  --weight 500
 
-Then recompile the reader and deploy: `python -m mpy_cross -o src/bitfont.mpy src/bitfont.py` and run `deploy.bat`.
+The head/row fonts use `gen_font.DEFAULT_CHARSET` (printable ASCII **+ `°`**, needed for the
+weather footer's temperatures). The hero font passes an explicit digits-only charset.
+
+Then just run `deploy.bat` — it recompiles every module (including `bitfont.mpy`) with
+`mpy-cross` and copies the new `.fnt` files to the device.
