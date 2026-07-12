@@ -62,9 +62,14 @@ WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_l
                              # for is now moot (fetches are plain HTTP, see CLAUDE.md "RAM-vs-HTTPS conflict
                              # (RESOLVED)"), so this should rarely fire, but a stuck socket read or driver
                              # busy-wait could still hang an iteration. 150s gives headroom over the worst
-                             # legitimate case with 2 configured stops (2 stops x 3 retries x 15s timeout
-                             # each = ~92s, plus the weather fetch's ~30s worst case = ~122s on the tick they
-                             # coincide) -- if settings.json ever lists more than ~3 stops, this may need raising.
+                             # legitimate case with 2 configured stops: one fetch's worst case is
+                             # retries*timeout_s + (retries-1)*RETRY_DELAY_S = 3*10 + 2*3 = 36s (sl.py /
+                             # openmeteo.py share this shape), so 2 stops + weather sequentially worst-cases
+                             # at ~108s. Note weather now retries EVERY tick while erroring (see
+                             # display_loop's weather_error handling), not just its own slow bucket, so that
+                             # 36s is a common addition during an outage, not a rare coincidence -- still
+                             # well inside the 150s budget. If settings.json ever lists more than ~3 stops,
+                             # this may need raising.
 
 _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
                           # interval longer than the WDT window can't trip a spurious reboot during a normal wait
@@ -255,7 +260,8 @@ async def display_loop(cfg):
                            and weather_cfg.get("longitude") is not None)
     weather_pull_interval_s = (weather_cfg.get("pull_interval_min", 30) if weather_cfg else 30) * 60
     last_weather_bucket = None
-    last_weather = None   # last-good weather summary; None -> no weather row
+    last_weather = None   # last-good weather summary (kept for logging even while erroring)
+    weather_error = False  # this pull failed/unusable -> render WEATHER_ERROR, not the stale reading
 
     while True:
         wdt.feed()
@@ -284,24 +290,33 @@ async def display_loop(cfg):
             stale_flags = [r is None for r in results]
             last_pull_bucket = pull_bucket
 
-        # Weather on its own (much slower) wall-clock-aligned bucket. A
-        # failure or unusable payload keeps the last-good summary silently
-        # -- weather has no stale marker of its own. retries=2 keeps this
-        # fetch's worst case (~30s) within the WDT budget.
+        # Weather on its own (much slower) wall-clock-aligned bucket -- EXCEPT
+        # while weather_error is set, when it retries on every tick instead
+        # of waiting out the rest of the (up to 30 min) bucket: getting stuck
+        # showing "Weather error" for that long over one bad fetch would be
+        # its own kind of stale. A failure or unusable payload sets
+        # weather_error so the footer shows that explicit message instead of
+        # a possibly-stale reading -- same reasoning as the per-stop STALE
+        # badge: an error means what we have can't be trusted, so say so
+        # rather than keep quiet about it. Uses openmeteo.fetch_today's
+        # default retries/timeout (see main.py's WDT_TIMEOUT_MS comment for
+        # the worst-case-time math this must stay inside).
         if weather_enabled:
             weather_bucket = int(time.time() // weather_pull_interval_s)
-            if weather_bucket != last_weather_bucket:
+            if weather_bucket != last_weather_bucket or weather_error:
                 try:
-                    raw = openmeteo.fetch_today(
-                        weather_cfg["latitude"], weather_cfg["longitude"], retries=2)
+                    raw = openmeteo.fetch_today(weather_cfg["latitude"], weather_cfg["longitude"])
                     w = weather.parse_weather(raw)
                     if w is not None:
                         last_weather = w
+                        weather_error = False
                         print("weather: " + weather.summary_text(w))
                     else:
-                        print("weather: unusable payload, keeping last-good")
+                        weather_error = True
+                        print("weather: unusable payload")
                 except Exception as e:
-                    print("weather: fetch failed, keeping last-good:", e)
+                    weather_error = True
+                    print("weather: fetch failed:", e)
                 last_weather_bucket = weather_bucket
 
         # Skip rendering only before the first fetch has produced ANYTHING --
@@ -317,11 +332,17 @@ async def display_loop(cfg):
                     for stop, deps, sf in zip(cfg["stops"], last_good, stale_flags)]
         date_str, time_str = _local_now_strings()
         footer = display.footer_lines(date_str, time_str)
-        frame = (sections, footer, last_weather)
+        # WEATHER_ERROR overrides even a previously-good reading -- don't show
+        # last-good as current once this pull has failed (see the weather
+        # pull above). weather_enabled and no pull yet -> plain None, same as
+        # weather disabled, until the first pull attempt resolves either way.
+        weather_for_frame = display.WEATHER_ERROR if weather_error else last_weather
+        frame = (sections, footer, weather_for_frame)
         flat = []
         for section in sections:
             flat.extend(display.section_lines(section))
-        rendered_key = "\n".join(flat + footer + [weather.summary_text(last_weather)])
+        weather_key = "weather: error" if weather_error else weather.summary_text(last_weather)
+        rendered_key = "\n".join(flat + footer + [weather_key])
 
         now = time.ticks_ms()
         full_due = (

@@ -67,8 +67,12 @@ GAP_RULE_HERO = 12
 GAP_HERO_LINE = 10       # gap between the hero row and the badge+destination line under it
 GAP_LINE_ROWS = 12       # gap between that line and the secondary departures list
 GAP_ROW = 8              # between a stop's smaller departure rows
-GROUP_GAP = 20           # around the divider between one stop's section and the next
-DIVIDER_HEIGHT = 1
+GROUP_GAP = 48           # whitespace between one stop's section and the next --
+                         # no divider line (removed per owner feedback); sized to
+                         # match the content-to-footer gap in the worst-case (both
+                         # stops at max departures) layout, so the two gaps read
+                         # as the same rhythm. Re-tune with tools/preview_home.py
+                         # if section content changes materially.
 
 GAP_NAME_STALE = 12      # between a stop name and its STALE badge (when that stop's data is old)
 
@@ -509,13 +513,33 @@ def _draw_footer_status_line(fb, weather, datetime_str, ly):
     _text_right(fb, row_f, datetime_str, CONTENT_X0 + CONTENT_W, ty)
 
 
+def _draw_footer_error_line(fb, message, datetime_str, ly):
+    """Same one-line footer band as _draw_footer_status_line, but for when
+    the weather fetch itself failed: showing the last-good reading next to
+    a live clock would look current when it isn't, so this replaces the
+    whole weather cluster with a plain text message instead (same reasoning
+    as the per-stop STALE badge -- CLAUDE.md "Departures logic & stops")."""
+    row_f = _fonts()["row"]
+    wi = _footer_line_height()
+    ty = ly + (wi - row_f.height) // 2
+    _text(fb, row_f, message, CONTENT_X0, ty)
+    _text_right(fb, row_f, datetime_str, CONTENT_X0 + CONTENT_W, ty)
+
+
+WEATHER_ERROR = "error"  # sentinel for the `weather` param: fetch failed, show an explicit message
+
+
 def draw_home(fb, sections, footer, weather=None):
-    """Draws each stop's section (from stop_section()) top-to-bottom with a
-    divider between them, then the footer (from footer_lines(), plus weather)
-    anchored near the bottom. A stop whose data is stale gets a STALE badge
-    after its name. Logs everything to serial (CLAUDE.md "make the code
-    corroborate the screen"). Returns (content_bottom, footer_top) logical-y
-    coordinates so callers/tests can check content didn't grow into the footer."""
+    """Draws each stop's section (from stop_section()) top-to-bottom, then the
+    footer (from footer_lines(), plus weather) anchored near the bottom. A
+    stop whose data is stale gets a STALE badge after its name. `weather` is
+    a dict from weather.parse_weather() for a normal footer, WEATHER_ERROR to
+    show "Weather error" in place of the cluster (fetch failed -- don't show
+    a possibly-old reading as current), or None/falsy to fall back to a plain
+    centered date/time (weather disabled). Logs everything to serial
+    (CLAUDE.md "make the code corroborate the screen"). Returns
+    (content_bottom, footer_top) logical-y coordinates so callers/tests can
+    check content didn't grow into the footer."""
     f = _fonts()
     hero_f, head_f, row_f = f["hero"], f["head"], f["row"]
 
@@ -526,8 +550,6 @@ def draw_home(fb, sections, footer, weather=None):
     for gi, section in enumerate(sections):
         if gi > 0:
             y += GROUP_GAP
-            _fill_rect(fb, CONTENT_X0, y, CONTENT_W, DIVIDER_HEIGHT, 1)
-            y += DIVIDER_HEIGHT + GROUP_GAP
 
         name = section["name"].upper()
         _text(fb, head_f, name, CONTENT_X0, y, tracking=LABEL_TRACKING)
@@ -581,7 +603,11 @@ def draw_home(fb, sections, footer, weather=None):
     # separation from the departures above is just the whitespace freed by not
     # stacking a weather row over the clock. Without weather it falls back to
     # the original centered date/time line(s).
-    if weather:
+    if weather == WEATHER_ERROR:
+        band_h = _footer_line_height()
+        footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
+        _draw_footer_error_line(fb, "Weather error", " ".join(footer), footer_top)
+    elif weather:
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
         _draw_footer_status_line(fb, weather, " ".join(footer), footer_top)
@@ -593,9 +619,13 @@ def draw_home(fb, sections, footer, weather=None):
             _text_centered(fb, row_f, line, fy)
             fy += row_f.height + GAP_ROW
 
-    import weather as wx
+    if weather == WEATHER_ERROR:
+        weather_summary = "weather: error"
+    else:
+        import weather as wx
+        weather_summary = wx.summary_text(weather)
     print("display: home screen -- " + " | ".join(logged) + " || "
-          + " | ".join(footer) + " || " + wx.summary_text(weather))
+          + " | ".join(footer) + " || " + weather_summary)
     # Returned so callers/tests can assert content didn't run into the footer
     # band (the FakeFB in tests only guards the physical buffer bounds).
     return content_bottom, footer_top

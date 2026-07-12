@@ -135,3 +135,16 @@ def test_draw_home_fits_with_weather_and_stale_badges():
     fb = FakeFB(display.PHYS_W, display.PHYS_H)
     content_bottom, footer_top = display.draw_home(fb, sections, footer, weather)
     assert content_bottom <= footer_top, "content ran into the footer with weather + stale badges"
+
+
+def test_draw_home_shows_weather_error_instead_of_stale_reading():
+    """A failed weather fetch must not silently keep showing the last-good
+    reading -- it should render the WEATHER_ERROR sentinel as an explicit
+    message, still fitting the single-line footer band."""
+    deps = _deps(("474", "Slussen", "4 min"))
+    sections = [display.stop_section("Mölnvik", deps)]
+    footer = display.footer_lines("Fre 10 jul", "14:32")
+
+    fb = FakeFB(display.PHYS_W, display.PHYS_H)
+    content_bottom, footer_top = display.draw_home(fb, sections, footer, display.WEATHER_ERROR)
+    assert content_bottom <= footer_top

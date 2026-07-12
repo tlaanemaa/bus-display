@@ -69,7 +69,7 @@ def test_format_precip_threshold():
     # shown at/above it.
     assert weather.format_precip({"precip": 5}) is None
     assert weather.format_precip({"precip": None}) is None
-    assert weather.format_precip({"precip": weather.PRECIP_SHOW_THRESHOLD}) == "20%"
+    assert weather.format_precip({"precip": weather.PRECIP_SHOW_THRESHOLD}) == "10%"
     assert weather.format_precip({"precip": 60}) == "60%"
 
 

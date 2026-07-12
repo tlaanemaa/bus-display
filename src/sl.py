@@ -17,14 +17,21 @@ import requests
 # nothing to protect by encrypting it.
 BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 
+# Same retry/timeout shape as openmeteo.py -- kept in sync deliberately (see
+# its module docstring). timeout_s=10 is deliberately aggressive: a hung
+# request past 10s is treated as dead and retried rather than waited out.
+# RETRY_DELAY_S=3 (not longer) keeps 2 stops x 3 retries within main.py's
+# per-tick WDT budget -- see main.py's WDT_TIMEOUT_MS comment for the math.
+RETRY_DELAY_S = 3
 
-def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retries=3, timeout_s=15):
-    """timeout_s bounds each attempt so a stuck TLS handshake (observed
+
+def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retries=3, timeout_s=10):
+    """timeout_s bounds each attempt so a stuck request (observed
     intermittently right after a fresh Wi-Fi connect -- see CLAUDE.md
     "Departures logic & stops") usually fails like any other network error
     instead of hanging, letting the retry/stale-data fallback take over.
     NOT a complete guarantee, though -- confirmed some hangs happen inside
-    blocking crypto work this timeout doesn't cover; main.py's hardware
+    blocking socket work this timeout doesn't cover; main.py's hardware
     watchdog is the actual backstop against those.
 
     direction: SL's direction_code (1 or 2) to filter server-side, keeping
@@ -46,5 +53,6 @@ def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retr
         except Exception as e:
             last_err = e
             print("sl: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
-            time.sleep_ms(300)
+            if attempt < retries - 1:
+                time.sleep(RETRY_DELAY_S)
     raise last_err

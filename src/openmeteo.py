@@ -18,11 +18,15 @@ import requests
 BASE_URL = "http://api.open-meteo.com/v1/forecast"
 _DAILY = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
 
+# Same retry/timeout shape as sl.py -- kept in sync deliberately (see this
+# module's docstring). See sl.RETRY_DELAY_S for the budget reasoning.
+RETRY_DELAY_S = 3
 
-def fetch_today(latitude, longitude, retries=3, timeout_s=15):
+
+def fetch_today(latitude, longitude, retries=3, timeout_s=10):
     """Today's forecast for a lat/lon. timeout_s bounds each attempt like
-    sl.fetch_departures (same intermittent-TLS-hang caveat -- main.py's
-    watchdog is the real backstop). Returns the raw Open-Meteo dict;
+    sl.fetch_departures (same intermittent-hang caveat -- main.py's watchdog
+    is the real backstop). Returns the raw Open-Meteo dict;
     weather.parse_weather() turns it into the footer summary.
 
     timezone=auto so the daily min/max/precip aggregate over the LOCAL day
@@ -42,5 +46,6 @@ def fetch_today(latitude, longitude, retries=3, timeout_s=15):
         except Exception as e:
             last_err = e
             print("openmeteo: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
-            time.sleep_ms(300)
+            if attempt < retries - 1:
+                time.sleep(RETRY_DELAY_S)
     raise last_err

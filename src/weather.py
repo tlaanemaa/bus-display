@@ -90,8 +90,9 @@ def format_temps(weather):
 # Below this precipitation probability the cue is suppressed entirely (the
 # condition icon already says "dry"); showing "5%" is noise on a glance
 # display. Tuned to the design intent: surface rain only when it's a real
-# possibility worth an umbrella.
-PRECIP_SHOW_THRESHOLD = 20
+# possibility worth an umbrella. Lowered 20 -> 10 (2026-07-12): 20 was hiding
+# numbers the owner still wanted to see.
+PRECIP_SHOW_THRESHOLD = 10
 
 
 def format_precip(weather):
