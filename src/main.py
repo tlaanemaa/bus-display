@@ -12,20 +12,21 @@ to src/settings.json, fill in your stop(s) (see CLAUDE.md "Departures
 logic & stops" for how to find a site id), then deploy it like any other
 file: `mpremote connect COM3 fs cp src/settings.json :settings.json`.
 
-The 48KB framebuffer is deliberately NOT allocated once at the top and
-kept resident -- see CLAUDE.md "Departures logic & stops" / RAM notes.
-Measured on this board: with it resident, the SL HTTPS/TLS handshake
-fails or hangs every time, even with 75-90KB nominally free (mbedtls's
-RSA-2048 certificate handling for this host needs more contiguous room
-than that, and repeated gc.collect() doesn't recover it -- it's live
-object memory, not garbage). Freeing the framebuffer during the fetch and
-only allocating it for the brief draw+refresh window fixes this
-reliably. The admin server (Microdot) is also not even imported once
-connected, for the same reason -- `server.py` builds its whole app and
-route table at import time (costing the same ~30KB+) regardless of
-whether `start_server()` is ever called, so `import server` is deferred
-into the AP-mode branch below where it's actually needed. It only has the
-Wi-Fi setup form today anyway, which is moot once already connected.
+The 48KB framebuffer is allocated ONCE at boot (in display_loop) and kept
+resident, reused for every refresh -- see CLAUDE.md "RAM-vs-HTTPS conflict
+(RESOLVED)". This reverses an earlier design: the framebuffer used to be
+allocated transiently, per cycle, ONLY because a resident buffer starved
+the SL TLS handshake (mbedtls's RSA-2048 cert verification needs a large
+contiguous block). Now that SL and Open-Meteo are fetched over plain HTTP
+(no TLS handshake at all), that pressure is gone -- and a resident buffer
+is also more robust, since a fresh 48KB alloc had begun to MemoryError on
+later cycles as the heap fragmented (MicroPython's GC never compacts).
+
+The admin server (Microdot) is still not imported once connected --
+`server.py` builds its whole app + route table at import time (~30KB+)
+regardless of whether start_server() is ever called, and an unused import
+whose top-level code does real work isn't free. It's deferred into the
+AP-mode branch below where it's actually needed (Wi-Fi setup only).
 """
 import framebuf
 import network
@@ -48,24 +49,22 @@ import weather
 from epd7in5v2 import EPD7in5V2
 
 # `server` (Microdot) is deliberately NOT imported here -- server.py builds
-# its whole Microdot app + route table at import time, which costs the same
-# ~30KB+ that starving the HTTPS fetch. It's only ever needed in AP-mode
-# setup, so it's imported lazily inside that branch of main() below. Simply
-# having "import server" at module level here was reintroducing the exact
-# RAM-vs-TLS conflict documented in CLAUDE.md ("Departures logic & stops")
-# even though start_server() was never called in STA mode -- confirmed by
-# isolating the import as the difference between a script that fetched
+# its whole Microdot app + route table at import time (~30KB+ resident). It's
+# only ever needed in AP-mode setup, so it's imported lazily inside that
+# branch of main() below. General lesson (it historically also starved the
+# TLS fetch, now moot with HTTP): an unused import isn't free if its
+# top-level code does real work -- confirmed by isolating the import as the
+# difference between a script that fetched
 # reliably and the real main.py hanging on every single fresh boot.
 
 WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_loop iteration ever takes
-                             # longer than this. Needed because the intermittent TLS hang documented in
-                             # CLAUDE.md ("Departures logic & stops") isn't reliably bounded by sl.py's own
-                             # socket-level timeout -- it can happen inside the handshake's own blocking
-                             # crypto work, not a socket read, so no Python-level timeout can interrupt it.
-                             # 150s gives headroom over the worst legitimate case with 2 configured stops
-                             # (2 stops x 3 retries x 15s timeout each = ~92s, plus the weather fetch's
-                             # ~30s worst case = ~122s on the tick they coincide) -- if settings.json ever
-                             # lists more than ~3 stops, this may need raising.
+                             # longer than this -- a general hang backstop. The TLS hang it was originally
+                             # for is now moot (fetches are plain HTTP, see CLAUDE.md "RAM-vs-HTTPS conflict
+                             # (RESOLVED)"), so this should rarely fire, but a stuck socket read or driver
+                             # busy-wait could still hang an iteration. 150s gives headroom over the worst
+                             # legitimate case with 2 configured stops (2 stops x 3 retries x 15s timeout
+                             # each = ~92s, plus the weather fetch's ~30s worst case = ~122s on the tick they
+                             # coincide) -- if settings.json ever lists more than ~3 stops, this may need raising.
 
 _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
                           # interval longer than the WDT window can't trip a spurious reboot during a normal wait
@@ -136,35 +135,37 @@ def _local_now_strings():
     return localtime.format_date(ly, lmo, ld), localtime.format_time(lh, lmi)
 
 
-def _draw_and_refresh(epd, sections, footer, weather_now, prev_sections, prev_footer, prev_weather, full):
-    """Allocates the 48KB framebuffer only for this draw+push window, then
-    lets it be freed (no reference survives the function returning) --
-    see module docstring for why it must not stay resident. Exactly ONE
-    48KB buffer is ever alive at a time, even for the differential partial
-    path below (see CLAUDE.md RAM notes).
+def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
+    """Draws `frame` into the RESIDENT framebuffer (fb/fb_buf, allocated once
+    at boot and passed in -- see display_loop) and pushes it to the panel.
 
-    `full` picks the refresh mode (see CLAUDE.md "Screen refresh strategy"
-    for the tradeoff): a full refresh flashes black/white and fully
-    discharges every pixel (clears accumulated ghosting); a partial refresh
-    is near-instant with no flash. display_loop() decides the cadence.
+    The framebuffer used to be allocated transiently, per cycle, ONLY because
+    a resident 48KB buffer starved the SL TLS handshake (CLAUDE.md "RAM-vs-
+    HTTPS conflict"). Now that SL and Open-Meteo are fetched over plain HTTP,
+    nothing does a TLS handshake, so no big contiguous block is contended --
+    a single resident buffer is both safe and BETTER: a fresh 48KB alloc had
+    started failing (MemoryError) on later cycles once fetches became reliable,
+    because the heap fragments and MicroPython's GC never compacts. Allocating
+    once, when the heap is cleanest, sidesteps that entirely.
 
-    Partial refresh is a TRUE DIFFERENTIAL update (2026-07-10): the panel's
-    partial mode drives each pixel from its 0x10 "old image" plane to its
-    0x13 "new image" plane, so we must supply the actual previously-drawn
-    frame (prev_sections/prev_footer) on 0x10, not just the new frame. That
-    makes only genuinely-changed pixels move -> minimal ghosting, and it
-    means the panel can be slept after every refresh (e-paper rule 1
-    restored) because the differential no longer depends on controller RAM
-    surviving between calls -- the old plane is re-uploaded explicitly. See
-    epd7in5v2.py's partial_old()/partial_new(). One buffer serves both
-    planes: render old -> stream to 0x10 -> re-render new into the SAME
-    buffer -> stream to 0x13 (the 0x10 bytes already live in the panel
-    controller by then)."""
-    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
-    fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
+    `frame` is the screen content -- the tuple splatted into draw_home()
+    (sections, footer, weather). `prev_frame` is the previously-drawn frame,
+    needed as the differential partial's 0x10 old plane.
 
+    `full` picks the refresh mode (see CLAUDE.md "Screen refresh strategy"):
+    a full refresh flashes black/white and fully discharges every pixel
+    (clears ghosting); a partial refresh is near-instant with no flash.
+
+    Partial refresh is a TRUE DIFFERENTIAL update (2026-07-10): the panel
+    drives each pixel from its 0x10 "old image" plane to its 0x13 "new image"
+    plane, so we supply the actual previously-drawn frame on 0x10, not just
+    the new frame -> only genuinely-changed pixels move (minimal ghosting),
+    and the panel can be slept after every refresh (the old plane is
+    re-uploaded explicitly). See epd7in5v2.py's partial_old()/partial_new().
+    The one buffer serves both planes: render old -> stream to 0x10 ->
+    re-render new into the SAME buffer -> stream to 0x13."""
     if full:
-        display.draw_home(fb, sections, footer, weather_now)
+        display.draw_home(fb, *frame)
         epd.init()
         epd.display(fb_buf)
         epd.sleep()
@@ -173,9 +174,9 @@ def _draw_and_refresh(epd, sections, footer, weather_now, prev_sections, prev_fo
     # Differential partial: old plane (0x10) first, then new plane (0x13).
     epd.init_part()
     epd.partial_begin()
-    display.draw_home(fb, prev_sections, prev_footer, prev_weather)  # OLD frame -> 0x10
+    display.draw_home(fb, *prev_frame)   # OLD frame -> 0x10
     epd.partial_old(fb_buf)
-    display.draw_home(fb, sections, footer, weather_now)             # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
+    display.draw_home(fb, *frame)        # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
     epd.partial_new(fb_buf)
     epd.sleep()
 
@@ -209,9 +210,9 @@ async def display_loop(cfg):
     strategy": most pushes use the near-instant, non-flashing DIFFERENTIAL
     partial mode, and a full (flashing) refresh is used at least every
     full_refresh_interval_s to clear residue. Partial refreshes need the
-    previously-drawn frame (prev_sections/prev_footer) as their 0x10 "old
-    image" plane, so it's cached after every refresh; the very first
-    refresh is forced full (no previous frame exists yet). The panel is
+    previously-drawn frame (`prev_frame`) as their 0x10 "old image" plane, so
+    it's cached after every refresh; the very first refresh is forced full
+    (no previous frame exists yet). The panel is
     slept after EVERY refresh (e-paper rule 1) -- the differential
     re-uploads the old plane explicitly, so it doesn't depend on the panel
     staying powered between calls.
@@ -219,11 +220,19 @@ async def display_loop(cfg):
     Every configured stop is always shown (no primary/fallback anymore).
     Each stop's own last-good departures are kept independently, so one
     stop's fetch failure doesn't blank out another stop that's still
-    fetching fine -- the footer's "(stale)" suffix is the only staleness
-    signal (see display.footer_lines).
+    fetching fine -- the failed stop gets a per-stop STALE badge (see
+    display.draw_home / stale_flags), the others are untouched.
     """
     epd = EPD7in5V2()
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
+    # Resident framebuffer: allocated ONCE here (the heap is at its cleanest,
+    # ~90KB contiguous) and reused for every refresh. Safe now that nothing
+    # does TLS (SL + Open-Meteo are plain HTTP) and more robust than the old
+    # per-cycle alloc, which had begun to MemoryError as the heap fragmented.
+    # See _draw_and_refresh.
+    gc.collect()
+    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
+    fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
     last_rendered = None
     last_full_refresh_ticks = None
     last_pull_bucket = None  # wall-clock // data_pull_interval_s of the last fetch
@@ -232,10 +241,9 @@ async def display_loop(cfg):
     data_pull_interval_s = cfg.get("data_pull_interval_min", 1) * 60
     render_interval_s = cfg.get("render_interval_min", 1) * 60
     full_refresh_interval_s = cfg.get("full_refresh_interval_min", 30) * 60
-    last_good = [[] for _ in cfg["stops"]]  # each stop's last-known departures
-    stale = True
-    prev_sections = None  # last-drawn frame, reused as the 0x10 old plane for the next partial
-    prev_footer = None
+    last_good = [[] for _ in cfg["stops"]]     # each stop's last-known departures
+    stale_flags = [False] * len(cfg["stops"])  # per-stop: is this stop showing OLD data (last fetch failed)?
+    prev_frame = None     # last-drawn (sections, footer, weather); the 0x10 old plane for the next partial
 
     # Optional today-weather footer (see CLAUDE.md "Screen design"). Absent
     # or disabled -> the footer draws the clock only, exactly as before.
@@ -248,7 +256,6 @@ async def display_loop(cfg):
     weather_pull_interval_s = (weather_cfg.get("pull_interval_min", 30) if weather_cfg else 30) * 60
     last_weather_bucket = None
     last_weather = None   # last-good weather summary; None -> no weather row
-    prev_weather = None   # weather on the last-drawn frame (the 0x10 old plane)
 
     while True:
         wdt.feed()
@@ -266,17 +273,21 @@ async def display_loop(cfg):
                 print("display_loop: unexpected fetch error:", e)
                 results = [None] * len(cfg["stops"])
 
-            all_ok = all(r is not None for r in results)
             for i, r in enumerate(results):
                 if r is not None:
                     last_good[i] = r
-            stale = not all_ok
+            # The STALE badge tracks whether THIS stop's fetch errored, full
+            # stop -- an error means what's on screen (old data, or "No
+            # departures") can't be trusted. Not gated on having prior data:
+            # "No departures" + STALE says "couldn't fetch", which is exactly
+            # the distinction that matters.
+            stale_flags = [r is None for r in results]
             last_pull_bucket = pull_bucket
 
         # Weather on its own (much slower) wall-clock-aligned bucket. A
         # failure or unusable payload keeps the last-good summary silently
-        # -- weather isn't gated by the departures "(stale)" flag. retries=2
-        # keeps this fetch's worst case (~30s) within the WDT budget.
+        # -- weather has no stale marker of its own. retries=2 keeps this
+        # fetch's worst case (~30s) within the WDT budget.
         if weather_enabled:
             weather_bucket = int(time.time() // weather_pull_interval_s)
             if weather_bucket != last_weather_bucket:
@@ -293,13 +304,20 @@ async def display_loop(cfg):
                     print("weather: fetch failed, keeping last-good:", e)
                 last_weather_bucket = weather_bucket
 
-        if not any(last_good):
+        # Skip rendering only before the first fetch has produced ANYTHING --
+        # no data and no error yet. Once a fetch has failed, fall through and
+        # render so the STALE badges announce "couldn't fetch" instead of
+        # leaving a silently frozen screen (the exact thing a stale marker is
+        # for). any(stale_flags) means at least one stop's fetch errored.
+        if not any(last_good) and not any(stale_flags):
             await _sleep_until_next_tick(wdt, render_interval_s)
             continue
 
-        sections = [display.stop_section(stop["name"], deps) for stop, deps in zip(cfg["stops"], last_good)]
+        sections = [display.stop_section(stop["name"], deps, stale=sf)
+                    for stop, deps, sf in zip(cfg["stops"], last_good, stale_flags)]
         date_str, time_str = _local_now_strings()
-        footer = display.footer_lines(date_str, time_str, stale=stale)
+        footer = display.footer_lines(date_str, time_str)
+        frame = (sections, footer, last_weather)
         flat = []
         for section in sections:
             flat.extend(display.section_lines(section))
@@ -320,14 +338,11 @@ async def display_loop(cfg):
         # actually redrawing -- so gating the periodic full on content_changed
         # too is correct: nothing to clear if nothing has been redrawing.
         if content_changed:
-            full = full_due or prev_sections is None
+            full = full_due or prev_frame is None
             print("display_loop: content changed, %s refresh" % ("full" if full else "partial"))
-            _draw_and_refresh(epd, sections, footer, last_weather,
-                              prev_sections, prev_footer, prev_weather, full=full)
+            _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full=full)
             last_rendered = rendered_key
-            prev_sections = sections
-            prev_footer = footer
-            prev_weather = last_weather
+            prev_frame = frame
             if full:
                 last_full_refresh_ticks = now
         gc.collect()
@@ -356,11 +371,10 @@ async def main():
         ip = network.WLAN(network.STA_IF).ifconfig()[0]
         print("main: connected, ip =", ip)
 
-        # A short settle delay here measurably improved first-fetch
-        # reliability in testing (4/4 clean vs. intermittent hangs/crashes
-        # without it) -- something about the Wi-Fi/TLS stack right after a
-        # fresh connect needs a moment before the first HTTPS handshake.
-        # See CLAUDE.md "Departures logic & stops".
+        # A short settle after Wi-Fi connect. It originally fixed intermittent
+        # first-TLS-handshake failures; with fetches now plain HTTP that's
+        # likely moot, but letting the Wi-Fi stack settle a moment is cheap
+        # and harmless, so it stays. (Drop it only with on-device testing.)
         await asyncio.sleep_ms(3000)
 
         # Warm the font advance caches on this still-clean heap, before the

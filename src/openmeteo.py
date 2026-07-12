@@ -1,5 +1,6 @@
-"""Thin I/O wrapper: fetch today's forecast JSON over HTTPS from
-Open-Meteo (no API key, like SL). All parsing lives in weather.py so it
+"""Thin I/O wrapper: fetch today's forecast JSON over plain HTTP from
+Open-Meteo (no API key, like SL; HTTP not HTTPS -- see BASE_URL). All
+parsing lives in weather.py so it
 can be tested on host without a `requests` import (CLAUDE.md "Testability
 rule"). Mirrors sl.py deliberately -- same retry/timeout shape.
 
@@ -10,7 +11,11 @@ import gc
 import time
 import requests
 
-BASE_URL = "https://api.open-meteo.com/v1/forecast"
+# Plain HTTP, like sl.py (verified http with no https redirect 2026-07-12):
+# skipping the TLS handshake avoids the mbedtls contiguous-RAM starvation
+# that plagues this board (see CLAUDE.md "RAM-vs-HTTPS conflict"). Public
+# weather data, no key -- nothing to protect.
+BASE_URL = "http://api.open-meteo.com/v1/forecast"
 _DAILY = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
 
 

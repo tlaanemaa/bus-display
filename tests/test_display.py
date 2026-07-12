@@ -81,9 +81,19 @@ def test_footer_lines_single_row_when_it_fits():
     assert display.footer_lines("Fre 10 jul", "14:32") == ["Fre 10 jul 14:32"]
 
 
-def test_footer_lines_marks_stale():
-    lines = display.footer_lines("Fre 10 jul", "14:32", stale=True)
-    assert "(stale)" in lines[-1]
+def test_stop_section_carries_stale_flag():
+    deps = _deps(("474", "Slussen", "4 min"))
+    assert display.stop_section("Mölnvik", deps, stale=True)["stale"] is True
+    assert display.stop_section("Mölnvik", deps)["stale"] is False
+
+
+def test_section_lines_marks_stale_for_change_detection():
+    deps = _deps(("474", "Slussen", "4 min"))
+    fresh = display.section_lines(display.stop_section("Mölnvik", deps))
+    stale = display.section_lines(display.stop_section("Mölnvik", deps, stale=True))
+    assert "STALE" not in fresh[0]
+    assert "STALE" in stale[0]
+    assert fresh != stale  # a stop going stale must change the rendered key
 
 
 def test_section_lines_flattens_for_change_detection():
@@ -110,3 +120,18 @@ def test_draw_home_stays_inside_physical_buffer_and_two_full_sections_fit():
     content_bottom, footer_top = display.draw_home(fb, sections, footer)
     assert fb.set_pixels  # something was actually drawn
     assert content_bottom <= footer_top, "content ran into the footer"
+
+
+def test_draw_home_fits_with_weather_and_stale_badges():
+    """The tightest real case: 2 stops x 3 departures, the weather footer,
+    and both stops flagged STALE must still fit and stay in the buffer."""
+    deps1 = _deps(("474", "Slussen", "4 min"), ("440", "Slussen", "12 min"), ("425", "Nacka", "19 min"))
+    deps2 = _deps(("471", "Slussen", "7 min"), ("474", "Slussen", "16 min"), ("469", "Ålstäket", "24 min"))
+    sections = [display.stop_section("Mölnvik", deps1, stale=True),
+                display.stop_section("Grisslinge", deps2, stale=True)]
+    footer = display.footer_lines("Fre 10 jul", "14:32")
+    weather = {"condition": "rain", "tmin": 6, "tmax": 12, "precip": 60}
+
+    fb = FakeFB(display.PHYS_W, display.PHYS_H)
+    content_bottom, footer_top = display.draw_home(fb, sections, footer, weather)
+    assert content_bottom <= footer_top, "content ran into the footer with weather + stale badges"

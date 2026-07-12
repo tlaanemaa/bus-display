@@ -70,20 +70,25 @@ GAP_ROW = 8              # between a stop's smaller departure rows
 GROUP_GAP = 20           # around the divider between one stop's section and the next
 DIVIDER_HEIGHT = 1
 
+GAP_NAME_STALE = 12      # between a stop name and its STALE badge (when that stop's data is old)
+
 BADGE_PAD_X_HEADLINE, BADGE_PAD_Y_HEADLINE = 10, 5
 BADGE_PAD_X_ROW, BADGE_PAD_Y_ROW = 6, 3
 
 GAP_BADGE_DEST = 14   # gap between a route badge and the destination text after it
 GAP_DEST_TIME = 10    # gap between a row's destination and its right-aligned time
 
-# Footer weather row (drawn above the clock line -- see draw_home / the
-# weather glyphs above). The icon box is a touch taller than the temps so
-# it reads as the anchor of the row.
-WEATHER_ICON_PAD = 6      # icon box height = head font height + this
-GAP_WEATHER_ICON = 12     # icon -> temperature
-GAP_TEMP_PRECIP = 18      # temperature -> precip cue
+# Footer status line: one row along the bottom -- weather on the left
+# (condition glyph + high/low + optional rain %), date/time on the right --
+# so the whole footer is a single compact band, not a stacked weather row
+# over a clock line. All text is at row size (the footer is secondary to the
+# hero countdowns), with the glyph a touch taller so the condition still
+# reads at a glance.
+WEATHER_ICON_PAD = 8      # glyph box height = row font height + this
+GAP_WEATHER_ICON = 10     # glyph -> temperature
+GAP_TEMP_PRECIP = 14      # temperature -> precip cue
 GAP_DROP_PRECIP = 6       # droplet -> its percentage
-GAP_WEATHER_CLOCK = 10    # weather row -> clock line below it
+GAP_WEATHER_DATE = 20     # minimum gap between the weather cluster and the date/time
 
 
 # --- fonts: streamed from flash, opened lazily on first use (never at
@@ -391,7 +396,7 @@ def draw_weather_glyph(fb, condition, x, y, s, color=1):
     _WEATHER_DRAWERS.get(condition, _draw_cloudy)(fb, x, y, s, color)
 
 
-def stop_section(name, deps):
+def stop_section(name, deps, stale=False):
     """Pure: content for one stop's section (no drawing) -- the hero
     departure split into (main, unit) for the two-size hero treatment,
     its route badge + destination (truncated to fit at head size), and
@@ -400,13 +405,17 @@ def stop_section(name, deps):
     and right-aligned time width). "No departures" never gets the hero
     treatment -- there's nothing urgent to emphasize.
 
+    `stale` marks this stop's shown data as no-longer-fresh (its last fetch
+    failed) -- draw_home renders a STALE badge after the name. It's per-stop
+    on purpose: one stop failing doesn't make the others' data old.
+
     Not framebuffer-pure: it measures with the real fonts (opening them
     from flash) so truncation matches the ink. That's fine on host too --
     the .fnt files are plain data both places."""
     import departures
     if not deps:
         return {"name": name, "hero_main": None, "hero_unit": None,
-                "badge_line": None, "dest": "No departures", "rows": []}
+                "badge_line": None, "dest": "No departures", "rows": [], "stale": stale}
 
     f = _fonts()
     head, row = f["head"], f["row"]
@@ -425,13 +434,13 @@ def stop_section(name, deps):
         rows.append((dep["line"], _truncate_to_width(row, dep["destination"], dest_max_w), dep["display"]))
 
     return {"name": name, "hero_main": hero_main, "hero_unit": hero_unit,
-            "badge_line": badge_line, "dest": dest, "rows": rows}
+            "badge_line": badge_line, "dest": dest, "rows": rows, "stale": stale}
 
 
 def section_lines(section):
     """Flat list of every text string a section contains, in display
     order -- used for change-detection and serial logging."""
-    lines = [section["name"]]
+    lines = [section["name"] + (" STALE" if section.get("stale") else "")]
     if section["hero_main"] is not None:
         lines.append(section["hero_main"] + (" " + section["hero_unit"] if section["hero_unit"] else ""))
         lines.append("%s  %s" % (section["badge_line"], section["dest"]))
@@ -441,70 +450,78 @@ def section_lines(section):
     return lines
 
 
-def footer_lines(date_str, time_str, stale=False):
-    """Pure: footnote text -- just the current local date/time, with a
-    "(stale)" suffix when the last fetch cycle didn't succeed for every
-    configured stop. One row if it fits at row size, else two."""
+def footer_lines(date_str, time_str):
+    """Pure: footnote text -- just the current local date/time. One row if
+    it fits at row size, else two. Staleness is NOT shown here anymore -- it
+    gets a per-stop STALE badge after the stop name instead (see
+    stop_section / draw_home), because a small footer suffix next to a
+    live-looking screen was missed."""
     f = _fonts()["row"]
     text = "%s %s" % (date_str, time_str)
-    if stale:
-        text += " (stale)"
     if f.measure(text) <= CONTENT_W:
         return [text]
-    line2 = time_str + (" (stale)" if stale else "")
-    return [date_str, line2]
+    return [date_str, time_str]
 
 
-def _weather_row_height():
-    return _fonts()["head"].height + WEATHER_ICON_PAD
+def _footer_line_height():
+    """Height of the single footer status line -- the glyph box, which is a
+    touch taller than the row text it sits beside."""
+    return _fonts()["row"].height + WEATHER_ICON_PAD
 
 
-def _draw_weather_row(fb, weather, ly):
-    """Draw the centered "today" weather row at logical y `ly`: condition
-    icon + high/low temperature, plus a droplet + precipitation-chance cue
-    when it's high enough to matter (weather.format_precip). All one
-    centered group, vertically centered on the icon-box height. weather is
-    the dict from weather.parse_weather()."""
+def _weather_cluster_width(row_f, wi, temps, precip):
+    w = wi + GAP_WEATHER_ICON + row_f.measure(temps)
+    if precip:
+        w += GAP_TEMP_PRECIP + wi // 2 + GAP_DROP_PRECIP + row_f.measure(precip)
+    return w
+
+
+def _draw_footer_status_line(fb, weather, datetime_str, ly):
+    """Draw the one-line footer at logical y `ly`: the weather cluster
+    (condition glyph + high/low + optional rain %) left-aligned, the
+    date/time right-aligned, everything vertically centered on the glyph-box
+    height. If the rain % would collide with the date/time it's dropped (the
+    glyph already signals rain) -- but at the measured widths it fits. weather
+    is the dict from weather.parse_weather()."""
     import weather as wx  # pure module (no hardware imports); lazy like departures
-    head_f = _fonts()["head"]
     row_f = _fonts()["row"]
-    wi = _weather_row_height()
+    wi = _footer_line_height()
+    ty = ly + (wi - row_f.height) // 2
 
     temps = wx.format_temps(weather)
     precip = wx.format_precip(weather)
-    tw = head_f.measure(temps)
-    total = wi + GAP_WEATHER_ICON + tw
-    if precip:
-        pw = row_f.measure(precip)
-        total += GAP_TEMP_PRECIP + wi // 2 + GAP_DROP_PRECIP + pw
+    dt_w = row_f.measure(datetime_str)
+    if precip and _weather_cluster_width(row_f, wi, temps, precip) + GAP_WEATHER_DATE + dt_w > CONTENT_W:
+        precip = None  # not enough room alongside the date -- drop the least-critical bit
 
-    x = CONTENT_X0 + max(0, (CONTENT_W - total) // 2)
+    x = CONTENT_X0
     draw_weather_glyph(fb, weather["condition"], x, ly, wi)
     x += wi + GAP_WEATHER_ICON
-    _text(fb, head_f, temps, x, ly + (wi - head_f.height) // 2)
-    x += tw
+    _text(fb, row_f, temps, x, ty)
+    x += row_f.measure(temps)
     if precip:
         x += GAP_TEMP_PRECIP
         dw = wi // 2
         _draw_drop(fb, x, ly + (wi - dw) // 2, dw)
         x += dw + GAP_DROP_PRECIP
-        _text(fb, row_f, precip, x, ly + (wi - row_f.height) // 2)
+        _text(fb, row_f, precip, x, ty)
+
+    _text_right(fb, row_f, datetime_str, CONTENT_X0 + CONTENT_W, ty)
 
 
 def draw_home(fb, sections, footer, weather=None):
-    """Draws each stop's section (from stop_section()) top-to-bottom, in
-    order, with a divider between sections, then footer (from
-    footer_lines()) anchored near the bottom of the drawable area with
-    its own smaller margin. Logs everything to serial (CLAUDE.md "make
-    the code corroborate the screen"). Returns (content_bottom,
-    footer_top) logical-y coordinates so callers/tests can check the
-    content didn't grow into the footer band."""
+    """Draws each stop's section (from stop_section()) top-to-bottom with a
+    divider between them, then the footer (from footer_lines(), plus weather)
+    anchored near the bottom. A stop whose data is stale gets a STALE badge
+    after its name. Logs everything to serial (CLAUDE.md "make the code
+    corroborate the screen"). Returns (content_bottom, footer_top) logical-y
+    coordinates so callers/tests can check content didn't grow into the footer."""
     f = _fonts()
     hero_f, head_f, row_f = f["hero"], f["head"], f["row"]
 
     fb.fill(0)
-    y = CONTENT_Y0
     logged = []
+    y = CONTENT_Y0
 
     for gi, section in enumerate(sections):
         if gi > 0:
@@ -512,11 +529,19 @@ def draw_home(fb, sections, footer, weather=None):
             _fill_rect(fb, CONTENT_X0, y, CONTENT_W, DIVIDER_HEIGHT, 1)
             y += DIVIDER_HEIGHT + GROUP_GAP
 
-        _text(fb, head_f, section["name"].upper(), CONTENT_X0, y, tracking=LABEL_TRACKING)
+        name = section["name"].upper()
+        _text(fb, head_f, name, CONTENT_X0, y, tracking=LABEL_TRACKING)
+        if section.get("stale"):
+            # A STALE badge right after the name, on the header line, next to
+            # the possibly-outdated countdown below it -- prominent, per-stop,
+            # and (unlike a full-width bar) no border along the frame cutout.
+            bx = CONTENT_X0 + head_f.measure(name, LABEL_TRACKING) + GAP_NAME_STALE
+            by = y + (head_f.height - (row_f.height + 2 * BADGE_PAD_Y_ROW)) // 2
+            _badge(fb, row_f, "STALE", bx, by, BADGE_PAD_X_ROW, BADGE_PAD_Y_ROW)
         y += head_f.height + GAP_LABEL_RULE
         _fill_rect(fb, CONTENT_X0, y, CONTENT_W, RULE_HEIGHT, 1)
         y += RULE_HEIGHT + GAP_RULE_HERO
-        logged.append(section["name"])
+        logged.append(name + (" STALE" if section.get("stale") else ""))
 
         if section["hero_main"] is not None:
             hw = _text(fb, hero_f, section["hero_main"], CONTENT_X0, y)
@@ -551,18 +576,22 @@ def draw_home(fb, sections, footer, weather=None):
 
     content_bottom = y  # logical y just past the last section, before the footer
 
-    # Footer band, bottom-anchored: an optional weather row sits above the
-    # clock line(s), both inside the same band (see _draw_weather_row).
-    text_h = len(footer) * row_f.height + max(0, len(footer) - 1) * GAP_ROW
-    weather_h = (_weather_row_height() + GAP_WEATHER_CLOCK) if weather else 0
-    footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - text_h - weather_h
-    fy = footer_top
+    # Footer band, bottom-anchored. With weather it's a SINGLE status line
+    # (weather left, date/time right -- see _draw_footer_status_line); the
+    # separation from the departures above is just the whitespace freed by not
+    # stacking a weather row over the clock. Without weather it falls back to
+    # the original centered date/time line(s).
     if weather:
-        _draw_weather_row(fb, weather, fy)
-        fy += _weather_row_height() + GAP_WEATHER_CLOCK
-    for line in footer:
-        _text_centered(fb, row_f, line, fy)
-        fy += row_f.height + GAP_ROW
+        band_h = _footer_line_height()
+        footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
+        _draw_footer_status_line(fb, weather, " ".join(footer), footer_top)
+    else:
+        text_h = len(footer) * row_f.height + max(0, len(footer) - 1) * GAP_ROW
+        footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - text_h
+        fy = footer_top
+        for line in footer:
+            _text_centered(fb, row_f, line, fy)
+            fy += row_f.height + GAP_ROW
 
     import weather as wx
     print("display: home screen -- " + " | ".join(logged) + " || "

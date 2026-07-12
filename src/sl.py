@@ -1,14 +1,21 @@
-"""Thin I/O wrapper: fetch departures JSON over HTTPS from SL's Transport
-API (see CLAUDE.md "SL Transport API" -- no API key needed). All
-parsing/filtering/formatting logic lives in departures.py so it can be
-tested on host without a `requests` import (see CLAUDE.md "Testability
-rule").
+"""Thin I/O wrapper: fetch departures JSON over plain HTTP from SL's
+Transport API (see CLAUDE.md "SL Transport API" -- no API key needed; HTTP
+not HTTPS on purpose, see BASE_URL). All parsing/filtering/formatting logic
+lives in departures.py so it can be tested on host without a `requests`
+import (see CLAUDE.md "Testability rule").
 """
 import gc
 import time
 import requests
 
-BASE_URL = "https://transport.integration.sl.se/v1/sites/%s/departures"
+# Plain HTTP, deliberately: SL serves this endpoint over http with no
+# redirect to https (verified 2026-07-12), and doing so SKIPS THE TLS
+# HANDSHAKE ENTIRELY -- which is the whole RAM-vs-HTTPS conflict on this
+# PSRAM-less board (mbedtls's RSA-2048 cert verification intermittently
+# ran out of contiguous heap and hung/failed the fetch; see CLAUDE.md).
+# The data is public transit times with no key or credentials, so there's
+# nothing to protect by encrypting it.
+BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 
 
 def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retries=3, timeout_s=15):
