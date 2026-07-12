@@ -91,13 +91,32 @@ def parse_weather(raw_json):
 
 def is_for_today(reading, today_iso):
     """True if a parsed reading (from parse_weather) is still TODAY's forecast
-    -- its `date` matches `today_iso` (local 'YYYY-MM-DD'). Used to decide
-    whether a last-good reading is worth keeping when a fresh pull fails (a
-    daily high/low a few hours old is still current-for-today) vs. falling
-    back to the explicit "Weather error" (see main.py's weather handling). A
-    missing reading, or a missing/prior-day date, is not today -> False, which
-    also cleanly covers "too old" (anything before today fails the match)."""
+    -- its `date` matches `today_iso` (local 'YYYY-MM-DD'). A missing reading,
+    or a missing/prior-day date, is not today -> False (covers the across-
+    midnight case). This is the OUTER guard; keep_last_good adds a freshness
+    bound on top (see below)."""
     return bool(reading) and reading.get("date") == today_iso
+
+
+def keep_last_good(reading, today_iso, age_s, max_age_s):
+    """Decide whether a failed/unusable weather pull should KEEP showing
+    `reading` instead of falling back to the explicit "Weather error".
+
+    True only when the reading is both still today's forecast (is_for_today)
+    AND fresh enough -- fetched no more than `max_age_s` ago. `age_s` is
+    now - fetched-at (main.py supplies it from the device clock); None means
+    no prior good fetch -> not usable.
+
+    The freshness bound matters because Open-Meteo REVISES the daily forecast
+    through the day as new model runs arrive (precip probability especially --
+    e.g. ICON re-runs every ~3h), so an unbounded "any time today" fallback
+    could show a stale morning reading in the evening during a long outage.
+    Within max_age_s the reading is recent enough to still be trustworthy;
+    past it we'd rather show the honest error. Configurable via the weather
+    block's max_age_min (see settings.example.json)."""
+    if age_s is None:
+        return False
+    return is_for_today(reading, today_iso) and age_s <= max_age_s
 
 
 def format_temps(weather):

@@ -84,6 +84,24 @@ def test_is_for_today_keeps_todays_reading_only():
     assert weather.is_for_today(dict(reading, date=None), today) is False
 
 
+def test_keep_last_good_requires_today_and_fresh():
+    today = "2026-07-12"
+    reading = weather.parse_weather(_raw(0, 20, 11))   # date 2026-07-12
+    cap = 180 * 60  # 3h
+    # Today's forecast, fresh -> keep it over the error.
+    assert weather.keep_last_good(reading, today, 60 * 60, cap) is True
+    assert weather.keep_last_good(reading, today, cap, cap) is True   # exactly at the cap
+    # Today's forecast but too old -> fall back to the error (the daily
+    # forecast revises through the day, so a stale reading isn't trustworthy).
+    assert weather.keep_last_good(reading, today, cap + 1, cap) is False
+    # Prior-day reading is never kept, even if "fresh" by age.
+    stale = dict(reading, date="2026-07-11")
+    assert weather.keep_last_good(stale, today, 60, cap) is False
+    # No prior good fetch (age None) or no reading -> not usable.
+    assert weather.keep_last_good(reading, today, None, cap) is False
+    assert weather.keep_last_good(None, today, 60, cap) is False
+
+
 def test_format_temps_low_first():
     w = {"condition": "rain", "tmin": 6, "tmax": 12, "precip": 60}
     assert weather.format_temps(w) == "6° / 12°"

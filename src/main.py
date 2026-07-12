@@ -310,8 +310,14 @@ async def display_loop(cfg, wifi_cfg=None):
                            and weather_cfg.get("latitude") is not None
                            and weather_cfg.get("longitude") is not None)
     weather_pull_interval_s = (weather_cfg.get("pull_interval_min", 30) if weather_cfg else 30) * 60
+    # How stale a last-good reading may be and still be shown during a fetch
+    # outage before we fall back to "Weather error". Bounds the outage
+    # fallback because Open-Meteo revises the daily forecast through the day
+    # (see weather.keep_last_good). Default 3h (~one ICON re-run); configurable.
+    weather_max_age_s = (weather_cfg.get("max_age_min", 180) if weather_cfg else 180) * 60
     last_weather_bucket = None
     last_weather = None   # last-good weather summary (kept for logging even while erroring)
+    last_weather_time = None  # time.time() of the last SUCCESSFUL weather pull (freshness cap)
     weather_error = False  # this pull failed/unusable -> render WEATHER_ERROR, not the stale reading
 
     while True:
@@ -409,17 +415,23 @@ async def display_loop(cfg, wifi_cfg=None):
                     print("weather: fetch failed:", e)
                 if fetched is not None:
                     last_weather = fetched
+                    last_weather_time = time.time()
                     weather_error = False
                     print("weather: " + weather.summary_text(fetched))
-                elif weather.is_for_today(last_weather, _local_today_iso()):
-                    # Keep the last-good reading: it's still today's forecast.
-                    weather_error = False
-                    print("weather: fetch failed -- keeping today's last-good ("
-                          + weather.summary_text(last_weather) + ")")
                 else:
-                    # Nothing valid for today -> honest error, retry each tick.
-                    weather_error = True
-                    print("weather: no valid reading for today -- showing error")
+                    # Keep the last-good reading only if it's still today's
+                    # forecast AND fresh enough (within weather_max_age_s) --
+                    # the daily forecast gets revised through the day, so an
+                    # unbounded "any time today" fallback could go stale during
+                    # a long outage. Otherwise show the honest error.
+                    age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
+                    if weather.keep_last_good(last_weather, _local_today_iso(), age_s, weather_max_age_s):
+                        weather_error = False
+                        print("weather: fetch failed -- keeping last-good (%s, %d min old)"
+                              % (weather.summary_text(last_weather), age_s // 60))
+                    else:
+                        weather_error = True
+                        print("weather: no fresh valid reading for today -- showing error")
                 last_weather_bucket = weather_bucket
 
         # Skip rendering ONLY before the very first pull attempt completes --

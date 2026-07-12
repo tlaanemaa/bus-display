@@ -13,6 +13,7 @@
     "enabled": true,
     "latitude": 59.33,
     "longitude": 18.06,
-    "pull_interval_min": 30
+    "pull_interval_min": 30,
+    "max_age_min": 180
   }
 }
