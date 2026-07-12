@@ -77,6 +77,12 @@ _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling be
 _FB_WIDTH = 800
 _FB_HEIGHT = 480
 
+# After this many consecutive pulls in which EVERY stop's fetch failed, attempt
+# an explicit Wi-Fi reconnect (see wifi.reconnect). All stops failing at once is
+# a connectivity signal, not an SL-side one. 3 (~3 min at the default 1-min pull)
+# gives the ESP32's own auto-reconnect a chance to recover first before we step in.
+_WIFI_RECONNECT_AFTER_FAILS = 3
+
 
 def _fetch_all_stops(cfg):
     """Fetch every configured stop independently, in the order given in
@@ -140,6 +146,18 @@ def _local_now_strings():
     return localtime.format_date(ly, lmo, ld), localtime.format_time(lh, lmi)
 
 
+def _safe_sleep(epd):
+    """Best-effort panel power-down, called from a finally so a mid-refresh
+    error never leaves the panel powered/active between cycles (e-paper rule
+    1 -- leaving it active degrades it). Swallows its own error so it can't
+    mask the original refresh exception; a hang inside sleep() itself is the
+    hardware watchdog's job, not this function's."""
+    try:
+        epd.sleep()
+    except Exception as e:
+        print("display: panel sleep after a refresh error also failed:", e)
+
+
 def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
     """Draws `frame` into the RESIDENT framebuffer (fb/fb_buf, allocated once
     at boot and passed in -- see display_loop) and pushes it to the panel.
@@ -169,24 +187,34 @@ def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
     re-uploaded explicitly). See epd7in5v2.py's partial_old()/partial_new().
     The one buffer serves both planes: render old -> stream to 0x10 ->
     re-render new into the SAME buffer -> stream to 0x13."""
+    # draw_home() for the full path is pure framebuffer work and runs BEFORE
+    # the panel is powered, so it needs no sleep guard; from epd.init() onward
+    # the panel is powered, so everything past it is wrapped to guarantee a
+    # power-down (see _safe_sleep) even if a write/busy-wait throws mid-refresh.
     if full:
         display.draw_home(fb, *frame)
-        epd.init()
-        epd.display(fb_buf)
-        epd.sleep()
+        try:
+            epd.init()
+            epd.display(fb_buf)
+        finally:
+            _safe_sleep(epd)
         return
 
     # Differential partial: old plane (0x10) first, then new plane (0x13).
-    epd.init_part()
-    epd.partial_begin()
-    display.draw_home(fb, *prev_frame)   # OLD frame -> 0x10
-    epd.partial_old(fb_buf)
-    display.draw_home(fb, *frame)        # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
-    epd.partial_new(fb_buf)
-    epd.sleep()
+    # init_part() powers the panel, so the whole sequence (including the
+    # draw_home re-renders between planes) is inside the try -> always slept.
+    try:
+        epd.init_part()
+        epd.partial_begin()
+        display.draw_home(fb, *prev_frame)   # OLD frame -> 0x10
+        epd.partial_old(fb_buf)
+        display.draw_home(fb, *frame)        # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
+        epd.partial_new(fb_buf)
+    finally:
+        _safe_sleep(epd)
 
 
-async def display_loop(cfg):
+async def display_loop(cfg, wifi_cfg=None):
     """Long-lived task. Ticks once per render interval, each tick
     re-rendering from cached departures + the current clock and pushing a
     panel refresh only when the rendered text actually changed (e-paper
@@ -248,7 +276,18 @@ async def display_loop(cfg):
     full_refresh_interval_s = cfg.get("full_refresh_interval_min", 30) * 60
     last_good = [[] for _ in cfg["stops"]]     # each stop's last-known departures
     stale_flags = [False] * len(cfg["stops"])  # per-stop: is this stop showing OLD data (last fetch failed)?
+    have_fetched = False  # has ANY pull attempt completed yet? (distinct from "the data is empty")
+    consecutive_all_failed = 0  # pulls in a row where EVERY stop errored -> Wi-Fi reconnect trigger
     prev_frame = None     # last-drawn (sections, footer, weather); the 0x10 old plane for the next partial
+
+    # Re-sync the RTC from NTP on a slow (daily) wall-clock bucket. The clock
+    # is set once at boot (main()), but the ESP32 RTC drifts over long 24/7
+    # uptime, and a FAILED boot sync would otherwise leave the footer clock
+    # wrong forever. last_ntp_bucket starts None so the first tick resyncs
+    # (harmlessly redundant after a good boot sync, self-healing after a bad
+    # one); failures are caught and simply retried on the next tick.
+    ntp_resync_interval_s = 24 * 3600
+    last_ntp_bucket = None
 
     # Optional today-weather footer (see CLAUDE.md "Screen design"). Absent
     # or disabled -> the footer draws the clock only, exactly as before.
@@ -289,6 +328,40 @@ async def display_loop(cfg):
             # the distinction that matters.
             stale_flags = [r is None for r in results]
             last_pull_bucket = pull_bucket
+            have_fetched = True
+
+            # Every stop failing at once points at connectivity (Wi-Fi/router),
+            # not one stop's SL data. After a few such pulls in a row, force a
+            # reconnect -- the ESP32 usually self-heals, but a router power-cycle
+            # is the likeliest 24/7 outage and auto-reconnect isn't guaranteed.
+            # Counter resets on any success or after an attempt, so we never
+            # hammer: at most one reconnect per _WIFI_RECONNECT_AFTER_FAILS pulls.
+            if all(stale_flags):
+                consecutive_all_failed += 1
+            else:
+                consecutive_all_failed = 0
+            if (consecutive_all_failed >= _WIFI_RECONNECT_AFTER_FAILS
+                    and wifi_cfg and wifi_cfg.get("ssid")):
+                try:
+                    wifi.reconnect(wifi_cfg["ssid"], wifi_cfg.get("password", ""))
+                except Exception as e:
+                    print("display_loop: Wi-Fi reconnect attempt failed:", e)
+                consecutive_all_failed = 0
+
+        # Re-sync the RTC from NTP on the slow daily bucket (see above). Kept
+        # inside the loop, not just at boot, so long-uptime drift and a failed
+        # boot sync both self-heal. On failure we DON'T advance the bucket, so
+        # it retries every tick until it succeeds (bounded by ntptime's own
+        # ~1s socket timeout; NTP outages are rare) -- same retry-until-good
+        # shape as the weather_error path below.
+        ntp_bucket = int(time.time() // ntp_resync_interval_s)
+        if ntp_bucket != last_ntp_bucket:
+            try:
+                ntptime.settime()
+                last_ntp_bucket = ntp_bucket
+                print("display_loop: NTP resync ok")
+            except Exception as e:
+                print("display_loop: NTP resync failed:", e)
 
         # Weather on its own (much slower) wall-clock-aligned bucket -- EXCEPT
         # while weather_error is set, when it retries on every tick instead
@@ -319,12 +392,16 @@ async def display_loop(cfg):
                     print("weather: fetch failed:", e)
                 last_weather_bucket = weather_bucket
 
-        # Skip rendering only before the first fetch has produced ANYTHING --
-        # no data and no error yet. Once a fetch has failed, fall through and
-        # render so the STALE badges announce "couldn't fetch" instead of
-        # leaving a silently frozen screen (the exact thing a stale marker is
-        # for). any(stale_flags) means at least one stop's fetch errored.
-        if not any(last_good) and not any(stale_flags):
+        # Skip rendering ONLY before the very first pull attempt completes --
+        # tracked by have_fetched, NOT inferred from "last_good is empty".
+        # A successful pull that legitimately returns zero departures (a normal
+        # nighttime state for a sparse stop) also leaves last_good empty, and
+        # that case MUST fall through to render "No departures" -- otherwise the
+        # panel would keep silently displaying the last evening's departures
+        # with no STALE badge (the exact stale-mistaken-for-current failure the
+        # badges exist to prevent). Once have_fetched is set, every subsequent
+        # tick renders: real data, "No departures", or STALE, as applicable.
+        if not have_fetched:
             await _sleep_until_next_tick(wdt, render_interval_s)
             continue
 
@@ -407,7 +484,7 @@ async def main():
         except Exception as e:
             print("main: font warm failed (non-fatal):", e)
 
-        await display_loop(settings.load())
+        await display_loop(settings.load(), wifi_cfg)
     else:
         wifi.start_ap()
         print("main: no/failed Wi-Fi config -- setup form at http://192.168.4.1")
