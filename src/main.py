@@ -146,6 +146,18 @@ def _local_now_strings():
     return localtime.format_date(ly, lmo, ld), localtime.format_time(lh, lmi)
 
 
+def _local_today_iso():
+    """Current local (Stockholm) date as 'YYYY-MM-DD' -- the same format as
+    Open-Meteo's forecast date (weather.parse_weather's 'date'), so a kept
+    last-good weather reading can be checked for being still today's. Assumes
+    the weather coords share the device's timezone (true here: both Stockholm);
+    a far-away weather location could disagree by a day near midnight, which
+    would just surface the honest 'Weather error' a bit early."""
+    y, mo, d, h, mi, s, _weekday, _yday = time.gmtime()[:8]
+    ly, lmo, ld, _lh, _lmi, _ls, _cest = localtime.utc_to_stockholm(y, mo, d, h, mi, s)
+    return "%04d-%02d-%02d" % (ly, lmo, ld)
+
+
 def _safe_sleep(epd):
     """Best-effort panel power-down, called from a finally so a mid-refresh
     error never leaves the panel powered/active between cycles (e-paper rule
@@ -363,33 +375,51 @@ async def display_loop(cfg, wifi_cfg=None):
             except Exception as e:
                 print("display_loop: NTP resync failed:", e)
 
-        # Weather on its own (much slower) wall-clock-aligned bucket -- EXCEPT
-        # while weather_error is set, when it retries on every tick instead
-        # of waiting out the rest of the (up to 30 min) bucket: getting stuck
-        # showing "Weather error" for that long over one bad fetch would be
-        # its own kind of stale. A failure or unusable payload sets
-        # weather_error so the footer shows that explicit message instead of
-        # a possibly-stale reading -- same reasoning as the per-stop STALE
-        # badge: an error means what we have can't be trusted, so say so
-        # rather than keep quiet about it. Uses openmeteo.fetch_today's
-        # default retries/timeout (see main.py's WDT_TIMEOUT_MS comment for
-        # the worst-case-time math this must stay inside).
+        # Weather on its own (much slower) wall-clock-aligned bucket.
+        #
+        # On a fetch failure or unusable payload we DON'T immediately show
+        # "Weather error" -- weather is a DAILY forecast (today's high/low/
+        # condition), so a last-good reading that's still for today is a few
+        # hours old at worst and perfectly usable (owner's call: a slightly
+        # aged reading beats an error). We only fall back to the explicit
+        # error when there's nothing valid to show -- no last-good at all, or
+        # a last-good from a PRIOR day (e.g. across midnight during an
+        # outage), which would be genuinely stale. `date` on the parsed
+        # reading (weather.parse_weather) vs. _local_today_iso() is that test;
+        # it subsumes both "wrong date" and "too old" (anything older than
+        # today no longer matches).
+        #
+        # The bucket is re-checked every tick ONLY while weather_error is set
+        # (i.e. while we're actually showing the error) -- then we retry
+        # eagerly to clear it fast. While we're happily showing a valid
+        # last-good reading, weather_error is False, so we just wait out the
+        # normal (up to 30 min) bucket; there's no urgency, and a next-bucket
+        # refetch will refresh it. Uses openmeteo.fetch_today's default
+        # retries/timeout (see WDT_TIMEOUT_MS for the worst-case-time math).
         if weather_enabled:
             weather_bucket = int(time.time() // weather_pull_interval_s)
             if weather_bucket != last_weather_bucket or weather_error:
+                fetched = None
                 try:
                     raw = openmeteo.fetch_today(weather_cfg["latitude"], weather_cfg["longitude"])
-                    w = weather.parse_weather(raw)
-                    if w is not None:
-                        last_weather = w
-                        weather_error = False
-                        print("weather: " + weather.summary_text(w))
-                    else:
-                        weather_error = True
+                    fetched = weather.parse_weather(raw)
+                    if fetched is None:
                         print("weather: unusable payload")
                 except Exception as e:
-                    weather_error = True
                     print("weather: fetch failed:", e)
+                if fetched is not None:
+                    last_weather = fetched
+                    weather_error = False
+                    print("weather: " + weather.summary_text(fetched))
+                elif weather.is_for_today(last_weather, _local_today_iso()):
+                    # Keep the last-good reading: it's still today's forecast.
+                    weather_error = False
+                    print("weather: fetch failed -- keeping today's last-good ("
+                          + weather.summary_text(last_weather) + ")")
+                else:
+                    # Nothing valid for today -> honest error, retry each tick.
+                    weather_error = True
+                    print("weather: no valid reading for today -- showing error")
                 last_weather_bucket = weather_bucket
 
         # Skip rendering ONLY before the very first pull attempt completes --

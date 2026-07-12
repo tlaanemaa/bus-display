@@ -78,7 +78,26 @@ def parse_weather(raw_json):
         "tmax": int(round(tmax)),
         "tmin": int(round(tmin)),
         "precip": None if precip is None else int(round(precip)),
+        # The forecast's own local date ("YYYY-MM-DD" from Open-Meteo's
+        # daily.time[0], returned regardless of which fields we request).
+        # Lets the caller decide a kept last-good reading is still valid --
+        # a daily high/low/condition a few hours old is still "today", but a
+        # reading from a prior day is stale (see main.py's weather handling).
+        # None only if the payload somehow omits time (Open-Meteo always sends
+        # it); callers treat a missing/mismatched date as not-today.
+        "date": _first(daily, "time"),
     }
+
+
+def is_for_today(reading, today_iso):
+    """True if a parsed reading (from parse_weather) is still TODAY's forecast
+    -- its `date` matches `today_iso` (local 'YYYY-MM-DD'). Used to decide
+    whether a last-good reading is worth keeping when a fresh pull fails (a
+    daily high/low a few hours old is still current-for-today) vs. falling
+    back to the explicit "Weather error" (see main.py's weather handling). A
+    missing reading, or a missing/prior-day date, is not today -> False, which
+    also cleanly covers "too old" (anything before today fails the match)."""
+    return bool(reading) and reading.get("date") == today_iso
 
 
 def format_temps(weather):

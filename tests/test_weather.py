@@ -18,7 +18,19 @@ def _raw(code, tmax, tmin, precip=None):
 
 def test_parse_basic_fields_and_rounding():
     w = weather.parse_weather(_raw(3, 12.4, 5.6, 40))
-    assert w == {"condition": "cloudy", "tmax": 12, "tmin": 6, "precip": 40}
+    assert w == {"condition": "cloudy", "tmax": 12, "tmin": 6, "precip": 40,
+                 "date": "2026-07-12"}
+
+
+def test_parse_extracts_forecast_date_for_staleness_check():
+    # The forecast's own date is carried through so the caller can tell a
+    # kept last-good reading is still today's vs. from a prior day.
+    w = weather.parse_weather(_raw(0, 20, 11))
+    assert w["date"] == "2026-07-12"
+    # Missing time array -> date None (caller treats that as not-today).
+    raw = _raw(0, 20, 11)
+    del raw["daily"]["time"]
+    assert weather.parse_weather(raw)["date"] is None
 
 
 def test_rain_intensity_buckets():
@@ -57,6 +69,19 @@ def test_parse_missing_or_empty_returns_none():
 def test_parse_precip_optional():
     w = weather.parse_weather(_raw(0, 20, 11))  # no precip field
     assert w["precip"] is None
+
+
+def test_is_for_today_keeps_todays_reading_only():
+    today = "2026-07-12"
+    reading = weather.parse_weather(_raw(0, 20, 11))   # date 2026-07-12
+    assert weather.is_for_today(reading, today) is True
+    # A prior-day reading is stale -> not today (drives the "Weather error"
+    # fallback across midnight during an outage).
+    stale = dict(reading, date="2026-07-11")
+    assert weather.is_for_today(stale, today) is False
+    # No reading at all, or a reading with no date, is not today.
+    assert weather.is_for_today(None, today) is False
+    assert weather.is_for_today(dict(reading, date=None), today) is False
 
 
 def test_format_temps_low_first():
