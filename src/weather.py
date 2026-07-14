@@ -7,12 +7,23 @@ Why Open-Meteo and not SMHI (the obvious Swedish source): SMHI's point
 forecast returns the whole multi-day hourly series (100KB+), and parsing
 that on this PSRAM-less board reruns the RAM-vs-HTTPS fight the SL fetch
 already had to win (CLAUDE.md "RAM-vs-HTTPS conflict"). Open-Meteo lets us
-request ONLY today's daily fields -> ~1KB. Keyless, same as SL.
+request ONLY today's daily + hourly fields -> a couple KB. Keyless, same
+as SL.
 
 The condition strings returned here are exactly the keys display.py's
 _WEATHER_DRAWERS dispatches on -- keep the two in sync. Rain is split
 three ways (drizzle / rain / rain_heavy) because intensity is what decides
-the umbrella, and WMO weather codes already carry it (see _CODE)."""
+the umbrella, and WMO weather codes already carry it (see _CODE).
+
+Condition + precip are derived from HOURLY data restricted to a waking
+window (07:00-23:00 local), not Open-Meteo's own `daily` weather_code/
+precipitation_probability_max fields. Verified 2026-07-13: Open-Meteo's
+daily aggregation takes the MAX (most severe) hourly code/value across the
+FULL 24h day, so a single overcast or drizzly hour at 3 AM reported
+"cloudy" for an otherwise clear day -- the whole day's glyph was held
+hostage by hours nobody's awake for. Computing our own mode/max over only
+07:00-23:00 fixes that; temps stay on the daily block (the overnight low
+is still relevant for dressing)."""
 
 
 # WMO weather interpretation codes -> our glyph buckets. Ranges collapsed
@@ -47,6 +58,72 @@ def condition_for_code(code):
         return "cloudy"
 
 
+# Waking-hours window for the daytime mode (see module docstring): a bucket
+# only counts if its hour is in [DAYTIME_START_HOUR, DAYTIME_END_HOUR).
+# 07:00 inclusive, 23:00 exclusive -- matches "outside of it we sleep".
+DAYTIME_START_HOUR = 7
+DAYTIME_END_HOUR = 23
+
+# Tie-break priority when two+ conditions are equally common across the
+# daytime window (possible with up to 16 hourly samples, e.g. 8 clear /
+# 8 rain): higher rank wins. Biases toward the more notable condition,
+# consistent with the app surfacing rather than hiding uncertain info
+# (e.g. the per-stop STALE badge, the explicit "Weather error" text).
+_SEVERITY = {
+    "clear": 0, "partly": 1, "cloudy": 2, "fog": 3, "drizzle": 4,
+    "rain": 5, "snow": 6, "rain_heavy": 7, "thunder": 8,
+}
+
+
+def dominant_condition(codes):
+    """Most common glyph bucket among a list of hourly WMO codes (already
+    restricted to the daytime window by the caller). Votes on the BUCKET
+    (condition_for_code(c)), not the raw code, so e.g. slight vs moderate
+    rain don't split the count. Ties broken by _SEVERITY (see above).
+    Empty input -> "cloudy" (safe default, same as an unknown code)."""
+    counts = {}
+    for c in codes:
+        bucket = condition_for_code(c)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    best = None
+    best_count = -1
+    for bucket, n in counts.items():
+        if n > best_count or (n == best_count and _SEVERITY.get(bucket, 0) > _SEVERITY.get(best, 0)):
+            best = bucket
+            best_count = n
+    return best if best is not None else "cloudy"
+
+
+def _daytime_hourly(hourly):
+    """Pick (weather_code, precipitation_probability) pairs from an
+    Open-Meteo `hourly` block whose local timestamp falls in the daytime
+    window. `hourly["time"]` entries look like "2026-07-13T14:00" (local,
+    since the fetch uses timezone=auto) -- hour is a fixed slice, no date
+    parsing needed. Skips a sample if its weather_code or precip entry is
+    missing/null (Open-Meteo can null an hourly value) -- a null code would
+    otherwise vote as "cloudy" via condition_for_code and skew the mode;
+    times are required. Returns ([], []) if the block is unusable."""
+    times = hourly.get("time")
+    codes = hourly.get("weather_code")
+    precips = hourly.get("precipitation_probability")
+    if not isinstance(times, list) or not isinstance(codes, list):
+        return [], []
+    picked_codes = []
+    picked_precips = []
+    for i, t in enumerate(times):
+        if not isinstance(t, str) or len(t) < 13:
+            continue
+        hour = int(t[11:13])
+        if not (DAYTIME_START_HOUR <= hour < DAYTIME_END_HOUR):
+            continue
+        if i >= len(codes) or codes[i] is None:
+            continue
+        picked_codes.append(codes[i])
+        if isinstance(precips, list) and i < len(precips) and precips[i] is not None:
+            picked_precips.append(precips[i])
+    return picked_codes, picked_precips
+
+
 def _first(daily, key):
     """First (today's) value of an Open-Meteo daily array, or None."""
     v = daily.get(key)
@@ -56,25 +133,31 @@ def _first(daily, key):
 
 
 def parse_weather(raw_json):
-    """raw_json: Open-Meteo response with a `daily` block requested for a
+    """raw_json: Open-Meteo response with `daily` (temps) and `hourly`
+    (weather_code, precipitation_probability) blocks requested for a
     single day (forecast_days=1). Returns a small dict --
     {condition, tmax, tmin, precip} -- or None if the payload is unusable
     (so the caller keeps last-good / draws no weather). Temps are rounded
-    to whole degrees (a glance display; the decimal is noise); precip is
-    the max precipitation probability for the day in %, or None if absent."""
+    to whole degrees (a glance display; the decimal is noise). condition
+    is the daytime-mode bucket and precip is the daytime max probability
+    in % (see module docstring for why daytime-only) -- None if the
+    daytime window yields no samples."""
     if not raw_json:
         return None
     daily = raw_json.get("daily")
-    if not isinstance(daily, dict):
+    hourly = raw_json.get("hourly")
+    if not isinstance(daily, dict) or not isinstance(hourly, dict):
         return None
-    code = _first(daily, "weather_code")
     tmax = _first(daily, "temperature_2m_max")
     tmin = _first(daily, "temperature_2m_min")
-    if code is None or tmax is None or tmin is None:
+    if tmax is None or tmin is None:
         return None
-    precip = _first(daily, "precipitation_probability_max")
+    codes, precips = _daytime_hourly(hourly)
+    if not codes:
+        return None
+    precip = max(precips) if precips else None
     return {
-        "condition": condition_for_code(code),
+        "condition": dominant_condition(codes),
         "tmax": int(round(tmax)),
         "tmin": int(round(tmin)),
         "precip": None if precip is None else int(round(precip)),
