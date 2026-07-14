@@ -112,7 +112,6 @@ if errorlevel 1 goto :fail
 echo.
 echo Done.
 echo.
-pause
 endlocal
 exit /b 0
 
@@ -122,6 +121,5 @@ echo ERROR: a command failed. Check that:
 echo   - the COM port is correct  (try: %MP% connect list)
 echo   - no REPL or serial monitor is holding the port
 echo.
-pause
 endlocal
 exit /b 1
