@@ -99,9 +99,10 @@ def _daytime_hourly(hourly):
     Open-Meteo `hourly` block whose local timestamp falls in the daytime
     window. `hourly["time"]` entries look like "2026-07-13T14:00" (local,
     since the fetch uses timezone=auto) -- hour is a fixed slice, no date
-    parsing needed. Skips a sample if its precip entry is missing; codes
-    and times are required (see openmeteo.py's requested fields, always
-    returned together). Returns ([], []) if the block is unusable."""
+    parsing needed. Skips a sample if its weather_code or precip entry is
+    missing/null (Open-Meteo can null an hourly value) -- a null code would
+    otherwise vote as "cloudy" via condition_for_code and skew the mode;
+    times are required. Returns ([], []) if the block is unusable."""
     times = hourly.get("time")
     codes = hourly.get("weather_code")
     precips = hourly.get("precipitation_probability")
@@ -115,7 +116,7 @@ def _daytime_hourly(hourly):
         hour = int(t[11:13])
         if not (DAYTIME_START_HOUR <= hour < DAYTIME_END_HOUR):
             continue
-        if i >= len(codes):
+        if i >= len(codes) or codes[i] is None:
             continue
         picked_codes.append(codes[i])
         if isinstance(precips, list) and i < len(precips) and precips[i] is not None:

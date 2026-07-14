@@ -75,6 +75,17 @@ def test_precip_is_daytime_max_not_full_day():
     assert w["precip"] == 30
 
 
+def test_daytime_mode_skips_null_weather_code():
+    # Open-Meteo can null an hourly value. A null code must be skipped, not
+    # counted as "cloudy" (condition_for_code(None) -> "cloudy") -- otherwise
+    # one null daytime hour skews the mode. Clear all day except a null at
+    # noon -> still clear.
+    hours = _all_day(0)
+    hours[12] = _hour(12, None)
+    w = weather.parse_weather(_raw(hours))
+    assert w["condition"] == "clear"
+
+
 def test_parse_extracts_forecast_date_for_staleness_check():
     # The forecast's own date is carried through so the caller can tell a
     # kept last-good reading is still today's vs. from a prior day.
