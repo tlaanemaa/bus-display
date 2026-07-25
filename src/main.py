@@ -189,6 +189,7 @@ def deep_sleep_cycle(
     state: "RetainedState | None",
     request_epoch: int,
     boot_ticks: int,
+    last_ntp_epoch: "int | None",
     fb: "Any",
     fb_buf: bytearray,
 ) -> int:
@@ -196,7 +197,6 @@ def deep_sleep_cycle(
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
     previous_frame = state["frame"] if state else None
     last_weather_time = state["weather_time"] if state else None
-    last_ntp_epoch = state["last_ntp"] if state else None
 
     lead_observed_ms = time.ticks_diff(time.ticks_ms(), boot_ticks)
     print("power: preparation took %d ms; requests target epoch %d" % (lead_observed_ms, request_epoch))
@@ -287,6 +287,7 @@ def main() -> None:
     wifi_cfg = config.load()
     fb, fb_buf = _allocate_framebuffer()
     state = _rtc_state_load(cfg)
+    last_ntp_epoch = state["last_ntp"] if state is not None else None
     request_epoch = wake_schedule.request_boundary(time.time(), 60)
 
     connected = False
@@ -296,6 +297,7 @@ def main() -> None:
     if connected and state is None:
         try:
             ntptime.settime()
+            last_ntp_epoch = int(time.time())
             print("main: cold-boot NTP sync ok")
         except Exception as exc:
             print("main: cold-boot NTP sync failed:", exc)
@@ -303,7 +305,7 @@ def main() -> None:
 
     print("main: wake advance = %d s" % cfg["power"]["wake_advance_s"])
     delay_s = deep_sleep_cycle(
-        cfg, connected, state, request_epoch, boot_ticks, fb, fb_buf,
+        cfg, connected, state, request_epoch, boot_ticks, last_ntp_epoch, fb, fb_buf,
     )
     _disable_wlan()
     machine.deepsleep(delay_s * 1000)

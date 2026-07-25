@@ -235,7 +235,7 @@ def test_deep_sleep_boot_allocates_before_rtc_wifi_ntp_and_reuses_objects(
         "ntp",
         "cycle",
     ]
-    assert cycle_args[0][-2:] == (framebuffer, framebuffer_bytes)
+    assert cycle_args[0][-3:] == (120, framebuffer, framebuffer_bytes)
 
 
 def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
@@ -313,6 +313,7 @@ def test_deep_sleep_cycle_reuses_supplied_framebuffer_without_allocating(
         previous,
         200,
         0,
+        previous["last_ntp"],
         supplied_fb,
         supplied_buf,
     )
@@ -513,7 +514,7 @@ def test_deep_sleep_policy_does_not_reuse_a_reconfigured_stop_by_position(monkey
     monkeypatch.setattr(main, "_fetch_all_stops", lambda *_args, **_kwargs: [None])
 
     main.deep_sleep_cycle(
-        cfg, True, previous, 200, 0, object(), bytearray()
+        cfg, True, previous, 200, 0, previous["last_ntp"], object(), bytearray()
     )
 
     assert saved[0]["frame"]["sections"][0]["dest"] == "No departures"
@@ -554,7 +555,7 @@ def test_deep_sleep_weather_future_timestamp_forces_an_adapter_attempt(monkeypat
     monkeypatch.setattr(main.weather, "parse_weather", lambda _raw: fetched)
 
     main.deep_sleep_cycle(
-        cfg, True, previous, 100, 0, object(), bytearray()
+        cfg, True, previous, 100, 0, previous["last_ntp"], object(), bytearray()
     )
 
     assert saved[0]["weather"] == fetched
@@ -607,7 +608,7 @@ def test_changed_deep_sleep_applies_encode_invalidate_refresh_commit_order(monke
     )
 
     main.deep_sleep_cycle(
-        cfg, False, previous, 200, 0, object(), bytearray()
+        cfg, False, previous, 200, 0, previous["last_ntp"], object(), bytearray()
     )
 
     assert events == [
@@ -670,7 +671,7 @@ def test_unchanged_deep_sleep_commits_without_invalidation_or_panel(monkeypatch)
     )
 
     main.deep_sleep_cycle(
-        cfg, False, previous, 200, 0, object(), bytearray()
+        cfg, False, previous, 200, 0, previous["last_ntp"], object(), bytearray()
     )
 
     assert events == [
@@ -725,7 +726,7 @@ def test_encode_failure_does_not_construct_epd_or_touch_rtc(monkeypatch):
 
     with pytest.raises(ValueError, match="oversize"):
         main.deep_sleep_cycle(
-            cfg, False, previous, 200, 0, object(), bytearray()
+            cfg, False, previous, 200, 0, previous["last_ntp"], object(), bytearray()
         )
 
     assert events == ["encode"]
