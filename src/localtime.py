@@ -1,7 +1,7 @@
 """Pure UTC -> Stockholm local time conversion (CET/CEST, EU DST rule) and
 formatting. No time/machine imports -- takes a UTC calendar tuple in,
 returns a local one out, so it runs under host CPython with pytest (see
-CLAUDE.md "Testability rule"). The device only has UTC from NTP; SL's own
+AGENTS.md "Testability rule"). The device only has UTC from NTP; SL's own
 `display` field sidesteps this for departure countdowns, but showing the
 actual current date/time in the footer needs real local time, hence this
 module.
@@ -13,30 +13,30 @@ _WEEKDAY_NAMES = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 _MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def _is_leap(year):
+def _is_leap(year: int) -> bool:
     return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
-def _days_in_month(year, month):
+def _days_in_month(year: int, month: int) -> int:
     if month == 2 and _is_leap(year):
         return 29
     return _DAYS_IN_MONTH[month - 1]
 
 
-def day_of_week(year, month, day):
+def day_of_week(year: int, month: int, day: int) -> int:
     """0=Sunday..6=Saturday, via Sakamoto's algorithm."""
     y = year - 1 if month < 3 else year
     return (y + y // 4 - y // 100 + y // 400 + _DOW_TABLE[month - 1] + day) % 7
 
 
-def _last_sunday(year, month):
+def _last_sunday(year: int, month: int) -> int:
     day = _days_in_month(year, month)
     while day_of_week(year, month, day) != 0:
         day -= 1
     return day
 
 
-def is_cest(year, month, day, hour):
+def is_cest(year: int, month: int, day: int, hour: int) -> bool:
     """EU summer-time rule: CEST from the last Sunday in March 01:00 UTC to
     the last Sunday in October 01:00 UTC; CET (winter) otherwise."""
     if month < 3 or month > 10:
@@ -50,7 +50,10 @@ def is_cest(year, month, day, hour):
     return (day < last_sun) or (day == last_sun and hour < 1)
 
 
-def add_hours(year, month, day, hour, minute, second, hours):
+def add_hours(
+    year: int, month: int, day: int, hour: int, minute: int, second: int,
+    hours: int,
+) -> "tuple[int, int, int, int, int, int]":
     """Add `hours` to a naive UTC calendar datetime, handling day/month/
     year rollover. Deliberately no time.mktime/datetime -- must run on
     MicroPython too, which has neither."""
@@ -76,18 +79,20 @@ def add_hours(year, month, day, hour, minute, second, hours):
     return year, month, day, hour, minute, second
 
 
-def utc_to_stockholm(year, month, day, hour, minute, second):
+def utc_to_stockholm(
+    year: int, month: int, day: int, hour: int, minute: int, second: int,
+) -> "tuple[int, int, int, int, int, int, bool]":
     """Returns (year, month, day, hour, minute, second, is_cest)."""
     cest = is_cest(year, month, day, hour)
     y, mo, d, h, mi, s = add_hours(year, month, day, hour, minute, second, 2 if cest else 1)
     return y, mo, d, h, mi, s, cest
 
 
-def format_date(year, month, day):
+def format_date(year: int, month: int, day: int) -> str:
     """e.g. 'Wed 9 Jul'."""
     dow = _WEEKDAY_NAMES[day_of_week(year, month, day)]
     return "%s %d %s" % (dow, day, _MONTH_NAMES[month - 1])
 
 
-def format_time(hour, minute):
+def format_time(hour: int, minute: int) -> str:
     return "%02d:%02d" % (hour, minute)

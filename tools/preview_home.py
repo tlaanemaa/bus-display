@@ -17,7 +17,7 @@ import display  # noqa: E402
 
 class ImgFB:
     """Minimal fb over an 800x480 buffer: fill(0)=white bg, color 1=black
-    (the panel's convention, CLAUDE.md pixel polarity)."""
+    (the panel's convention, AGENTS.md pixel polarity)."""
 
     def __init__(self, w, h):
         self.width, self.height = w, h

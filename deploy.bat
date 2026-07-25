@@ -13,7 +13,7 @@ rem bytecode + main.py + settings.json + fonts to the device (src\ maps 1:1 to
 rem the device filesystem root). Compiling on the host, not the device, is
 rem load-bearing on this PSRAM-less board -- on-device compilation fragments
 rem the heap and starves the TLS fetch (see the compile section below and
-rem CLAUDE.md "RAM-vs-HTTPS conflict"). A full copy of the handful of small
+rem AGENTS.md "RAM-vs-HTTPS conflict"). A full copy of the handful of small
 rem files takes a couple of seconds and is harmless to flash.
 rem
 rem Requires mpy-cross:  pip install mpy-cross
@@ -56,7 +56,7 @@ rem The whole app ships as bytecode, not source. Compiling a .py ON THE DEVICE
 rem fragments the heap enough to starve the SL/weather TLS handshake -- the
 rem largest contiguous free block collapses (confirmed on hardware adding
 rem weather: the first fetch hung every boot until these were precompiled; the
-rem contiguous free block jumped ~32KB -> ~90KB -- see CLAUDE.md "RAM-vs-HTTPS
+rem contiguous free block jumped ~32KB -> ~90KB -- see AGENTS.md "RAM-vs-HTTPS
 rem conflict"). Doing it here means an edit to any .py can NEVER ship as a
 rem stale .mpy, and the device never compiles anything but main.py. Needs
 rem mpy-cross (pip install mpy-cross).

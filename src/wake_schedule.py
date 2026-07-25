@@ -1,14 +1,16 @@
 """Pure wall-clock scheduling for one-cycle deep-sleep operation."""
 
 
-def request_boundary(now_s, interval_s=60):
+def request_boundary(now_s: float, interval_s: int = 60) -> int:
     """Current boundary if exactly on it, otherwise the next one."""
     now_s = int(now_s)
     remainder = now_s % interval_s
     return now_s if remainder == 0 else now_s + interval_s - remainder
 
 
-def next_wake_delay_s(now_s, wake_advance_s, interval_s=60):
+def next_wake_delay_s(
+    now_s: float, wake_advance_s: int, interval_s: int = 60,
+) -> int:
     """Seconds from now to `advance` seconds before the next boundary.
 
     Always schedules a future minute. A zero advance therefore wakes exactly

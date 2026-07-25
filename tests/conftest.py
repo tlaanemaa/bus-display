@@ -1,6 +1,6 @@
 """Host pytest needs a stand-in for MicroPython's framebuf module:
 display.py imports it for the scaled built-in font's scratch buffer (see
-display._scaled_text() -- CLAUDE.md "Testability rule"). Installed into
+display._scaled_text() -- AGENTS.md "Testability rule"). Installed into
 sys.modules before any test imports display, so the real import
 statement in display.py resolves to this fake without display.py having
 to know it's running on host.
@@ -8,7 +8,7 @@ to know it's running on host.
 Not pixel-accurate to the real built-in font (that's compiled into
 MicroPython's C source, unavailable on host) -- .text() just solid-fills
 each glyph's 8x8 cell. That's enough to exercise layout math and bounds
-checking; actual glyph legibility is verified on-device only (CLAUDE.md:
+checking; actual glyph legibility is verified on-device only (AGENTS.md:
 "on-device behavior is verified by eye")."""
 import sys
 import types

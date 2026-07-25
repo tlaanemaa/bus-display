@@ -19,7 +19,7 @@ You cannot see the physical screen. Verification loop: deploy → reset → watc
 - **Driver is ported** — `src/epd7in5v2.py`, a line-for-line MicroPython port of Waveshare's `epd7in5_V2.py` (RaspberryPi_JetsonNano/python/lib/waveshare_epd/ at https://github.com/waveshareteam/e-Paper, fetched 2026-07-04): same command bytes/order and `0x71` polling. **Don't re-derive the init sequence** — if the screen misbehaves it's wiring, framebuffer content, or call order, not the command bytes. `init_part`/partial ARE ported, as a *differential* update (see "Screen refresh strategy"). `init_fast`/4-gray intentionally not ported. Confirmed working on hardware 2026-07-04.
 - **No ready-made MicroPython driver exists for this panel+board — don't re-search.** Waveshare's repo has no MicroPython folder; the common community port (mcauser/micropython-waveshare-epaper) has no V2 variant. The port here IS the "use Waveshare's solution" path.
 - **RAM budget: ~165,632 bytes free heap** right after boot (`gc.collect(); gc.mem_free()`), MicroPython v1.28.0 ESP32_GENERIC, before app code.
-- **The 48 KB framebuffer is allocated ONCE at boot and kept resident** (`display_loop` allocates it, `_draw_and_refresh` reuses it). This reverses an earlier rule — see "RAM-vs-HTTPS conflict (RESOLVED)". The transient-per-cycle pattern existed *only* because a resident buffer starved the SL **TLS** handshake; now that SL + Open-Meteo are fetched over plain **HTTP** (no handshake), that pressure is gone, and a resident buffer is also *more* robust: a fresh 48 KB alloc had started `MemoryError`-ing on later cycles once fetches became reliable, because the heap fragments and MicroPython's GC never compacts. Allocating once, on the clean boot heap (~90 KB contiguous), sidesteps that. The only contiguous demands left are that one boot alloc and the tiny JSON parses (SL responses are ~2–4 KB here).
+- **The 48 KB framebuffer is allocated ONCE per boot/wake and reused for the whole cycle** (`deep_sleep_cycle` in deployed mode; `display_loop` in the legacy awake mode). It is deliberately lost during ESP32 deep sleep and reconstructed from compact semantic RTC state when needed. This reverses an earlier transient-per-refresh rule — see "RAM-vs-HTTPS conflict (RESOLVED)". SL + Open-Meteo now use plain **HTTP**, so the resident buffer no longer starves a TLS handshake. Allocating once on the clean boot heap (~90 KB contiguous) also avoids later `MemoryError` from fragmentation; MicroPython's GC never compacts.
 - **Never hold two 48 KB (BUF_SIZE) buffers at once — the allocator doesn't defragment.** A second full buffer `MemoryError`s (the heap fragments and nothing compacts). The resident buffer serves both differential planes by re-rendering into itself (see "Screen refresh strategy"); driver writes stream through a small reusable 512-byte scratch (`_write_bulk_inverted`/`_write_fill`), never a second full buffer. Apply the same pattern to any framebuffer-transforming code.
 
 ## Physical mounting & drawable area
@@ -40,7 +40,7 @@ Panel mounted rotated 90° (portrait) inside a picture frame that crops the edge
 
 ## Toolchain & commands
 
-Host setup: `python -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements-dev.txt`. This installs `esptool`, `mpremote`, `pytest`, and `mpy-cross` (mpy-cross precompiles vendored libs — see gotchas). Prefer `.venv\Scripts\python -m pytest` and the venv's module entry points so the repo does not depend on whichever global Python happens to be on PATH.
+Host setup: `python -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements-dev.txt`. This installs `esptool`, `mpremote`, `pytest`, `mypy`, and `mpy-cross` (mpy-cross precompiles vendored libs — see gotchas). Prefer `.venv\Scripts\python -m pytest`, `.venv\Scripts\python -m mypy`, and the venv's module entry points so the repo does not depend on whichever global Python happens to be on PATH.
 
 Find the port: `mpremote connect list` (called COM3 below).
 
@@ -62,6 +62,7 @@ mpremote connect COM3 reset                        # restart so new code runs (c
 mpremote connect COM3 repl                         # serial console; Ctrl-] exits, Ctrl-C interrupts main.py
 mpremote connect COM3 run tools/foo.py             # run a host file on-device WITHOUT copying (hardware experiments)
 pytest                                             # host-side tests for the pure-logic modules
+mypy                                              # static-check every first-party src module
 ```
 
 **The whole app ships as precompiled `.mpy`, not source** (`deploy.bat` runs `mpy-cross` on every `.py`, then copies only the bytecode). This keeps the boot heap clean and unfragmented on this PSRAM-less board: on-device compilation spikes/fragments RAM (parser/AST), which now threatens the resident 48 KB framebuffer's one-time boot allocation (and historically starved the TLS fetch — see "RAM-vs-HTTPS conflict (RESOLVED)"). `main.py` is the ONE exception (MicroPython auto-runs `:main.py` by name; it's small enough to compile on-device with everything else precompiled). So a single-file quick-deploy works directly only for `main.py`; for any other module, recompile first (`python -m mpy_cross src/foo.py && mpremote connect COM3 fs cp src/foo.mpy :foo.mpy`) or just run `deploy.bat`. The `.mpy` are **gitignored build artifacts** — `.py` is the source of truth. Requires `pip install mpy-cross`.
@@ -70,19 +71,19 @@ Only one process can hold the COM port — close any open REPL before deploying.
 
 ## Architecture
 
-Single asyncio event loop, no threads. The admin server and the fetch/redraw loop are **not both running** once connected (see "Departures logic & stops").
+Single asyncio event loop, no threads. The deployed path performs one boundary-aligned fetch/render cycle per boot, persists compact semantic display state to RTC memory, and enters ESP32 deep sleep.
 
-Boot flow currently loads `/config.json` and tries Wi-Fi STA, but the AP-mode setup portal is now **deprecated and must be removed** (settled 2026-07-19). This owner-managed device is configured over USB; it must not fall into a permanent setup-AP mode after a transient router outage. **Success**: NTP sync, brief settle, warm fonts, allocate the resident framebuffer, then fetch/redraw. **Missing credentials or unavailable Wi-Fi**: draw a clear on-screen Wi-Fi status so a wall-powered, unattended display never remains silently stale, and keep retrying/recovering without requiring USB. Wi-Fi credentials still live only on the device. A better onboarding experience may be designed later if the project expands.
+Boot loads `/settings.json` and `/config.json`, restores validated RTC state, tries Wi-Fi STA, waits for the next minute boundary, fetches, renders only changed content, saves retained state, and sleeps until the next prepared wake. This owner-managed device is configured over USB; it never falls into a permanent setup AP after a transient router outage. **Missing credentials or unavailable Wi-Fi**: draw a clear on-screen Wi-Fi status so a wall-powered, unattended display never remains silently stale, then retry on the next wake. Wi-Fi credentials still live only on the device. A better onboarding experience may be designed later if the project expands.
 
-**NTP is re-synced periodically, not only at boot** (`display_loop`, daily wall-clock bucket, added 2026-07-12): the boot `ntptime.settime()` is caught-and-ignored on failure, and the ESP32 RTC drifts over long 24/7 uptime — so a resync loop keeps the footer clock honest and self-heals a failed boot sync (`last_ntp_bucket` starts `None` → first tick resyncs; failures don't advance the bucket, so it retries each tick, bounded by ntptime's ~1 s socket timeout, until it succeeds). Departure countdowns are server-computed by SL so they're unaffected by RTC drift; only the footer clock/date and tick alignment depend on it.
+**NTP is re-synced periodically, not only at cold boot**: deep-sleep mode retains the last successful NTP epoch in RTC state and retries at most daily, after the request boundary; the legacy awake loop uses a daily wall-clock bucket. Failures do not advance the successful-sync marker, so a later cycle retries. Departure countdowns are server-computed by SL and unaffected by RTC drift; only the footer clock/date and tick alignment depend on it.
 
 ```
 src/                 # maps 1:1 to the device filesystem root
   main.py            # boot flow, resident framebuffer alloc, asyncio loop
   config.py          # load/save /config.json (Wi-Fi creds)
   settings.py        # load /settings.json (stops, cadence — gitignored)
-  wifi.py            # STA connect w/ timeout, AP fallback
-  server.py          # Microdot admin app (AP-mode Wi-Fi setup only)
+  wifi.py            # STA connect/reconnect; legacy AP helper remains unused
+  server.py          # legacy unused setup portal; pending cleanup
   display.py         # layout/render onto the framebuf; logs what it drew
   bitfont.py         # streamed 1-bit font reader (deployed as bitfont.mpy)
   fonts/             # *.fnt bitmap fonts streamed from flash (gen_font.py)
@@ -92,7 +93,7 @@ src/                 # maps 1:1 to the device filesystem root
   openmeteo.py       # thin HTTP wrapper: fetch Open-Meteo forecast JSON
   weather.py         # PURE: forecast JSON -> footer summary + glyph bucket
   localtime.py       # PURE UTC->Stockholm CET/CEST converter
-  lib/               # vendored (microdot.mpy) — don't hand-edit
+  lib/               # legacy vendored Microdot; unused, don't hand-edit
 tests/               # pytest on host CPython
 tools/               # host-side scripts (bring-up, one-off experiments)
                      #   gen_font.py: TTF -> .fnt; diag_mem.py: RAM probe;
@@ -101,7 +102,9 @@ tools/               # host-side scripts (bring-up, one-off experiments)
 
 **Testability rule**: anything pure (parsing, filtering, formatting, layout/time math) goes in modules with no `machine`/`network`/`requests` top-level imports, so it runs under host pytest. Hardware and network stay in thin adapters. On-device behavior is verified by eye — this is the only automated testing.
 
-**Key library choices**: **Microdot** (single-file asyncio web framework, in `src/lib/`) for the admin panel — runs **only during AP-mode setup**, not once connected. **Fonts**: a custom **streamed bitmap font** (`bitfont.py` + `fonts/*.fnt`, see "Fonts" below) replaced framebuf's built-in 8 px font. **peterhinch/micropython-font-to-py is the wrong tool here** and was tried+reverted (2026-07-11): it emits a *resident* Python glyph module, and even ~15 KB resident competes with the resident 48 KB framebuffer and other app RAM on this PSRAM-less board. The streamed approach keeps glyphs on flash instead.
+**Typing rule** (settled 2026-07-25): every first-party module under `src/` is checked by mypy; vendored `src/lib/microdot.py` is excluded. Runtime annotations use built-ins and quoted expressions. Typing-only imports live under `if False:` so the ESP32 never imports `typing` or creates resident typing objects. Keep annotations compatible with `mpy-cross`; run both mypy and the normal deploy compile before hardware verification.
+
+**Key library choices**: The old **Microdot** setup portal (`server.py` + `src/lib/`) is no longer imported or used; it remains only as known cleanup debt and should not shape new code. **Fonts**: a custom **streamed bitmap font** (`bitfont.py` + `fonts/*.fnt`, see "Fonts" below) replaced framebuf's built-in 8 px font. **peterhinch/micropython-font-to-py is the wrong tool here** and was tried+reverted (2026-07-11): it emits a *resident* Python glyph module, and even ~15 KB resident competes with the resident 48 KB framebuffer and other app RAM on this PSRAM-less board. The streamed approach keeps glyphs on flash instead.
 
 ### Fonts (streamed bitmap — settled 2026-07-12)
 
@@ -154,9 +157,10 @@ Print-like **Bitter** (slab serif; robust at 1-bit, strong hero digits) rendered
 
   Pull and render are separate knobs (pull less often than you render if you want a live clock but gentler API use).
 - **Ticks aligned to the WALL CLOCK, landing on `HH:MM:00`** so the on-screen clock flips in step with a phone. `_seconds_to_next_tick()` sleeps onto the next interval multiple using the NTP-synced `time.time()`. **Never wakes early** — the property that matters, since early = rendering the old minute, a full minute behind. `int(time.time())` floors, so the computed sleep overshoots the boundary by the sub-second fraction → we wake 0–1 s after `HH:MM:00`. (An earlier fixed `+2 s` margin was removed as premature — it visibly lagged the clock behind a phone.) Data pulls use an integer `time.time() // interval` bucket so they fire once per interval regardless of jitter. A long tick (worst case ~90 s) just lands on a later boundary; no drift accumulates.
-- **Watchdog fed during idle waits**: `_sleep_until_next_tick()` feeds the WDT every 60 s while sleeping, so a `render_interval_min` larger than the 150 s WDT window won't trip a spurious reboot mid-wait. The ESP32 stays awake between ticks (Wi-Fi up, RAM live); only the **panel** deep-sleeps (`epd.sleep()`). `machine.deepsleep` is deliberately unused — it would wipe `prev_frame` (the differential's old-plane source) and the resident framebuffer, forcing a full flash every wake (see "Open questions", power).
-- **One-minute wall-clock cadence is a fixed product requirement, including any future battery/deep-sleep mode** (settled 2026-07-19): departures' relative times and the footer clock both lose substantial utility at a slower cadence. Wake/render scheduling must remain aligned to minute boundaries; power work must optimize the duty cycle rather than relaxing freshness.
+- **Deep sleep is the deployed operating mode** (hardware-verified 2026-07-25; enabled by `power.deep_sleep: true`). Each wake reconstructs the previous semantic frame from validated ESP32 RTC user memory, renders it into the single 48 KB framebuffer for partial plane `0x10`, then reuses that buffer for the new `0x13` frame. The framebuffer itself is never retained or written to flash. Missing, corrupt, oversized, or incompatible retained state safely forces one full refresh; successful RTC writes are read back and decoded before sleep. Consecutive hardware-tested wakes restored a 722-byte state and used differential partial refresh without falling back to full.
+- **One-minute wall-clock cadence is a fixed product requirement** (settled 2026-07-19): departures' relative times and the footer clock both lose substantial utility at a slower cadence. Deep sleep wakes `wake_advance_s` (default 3) before the next minute, then holds requests until the `HH:MM:00` boundary. The advance is a tuning knob for measured boot/Wi-Fi preparation time; zero retains boundary-wake behavior.
 - **Deep-sleep mode makes one network attempt per source per wake** (settled from hardware test 2026-07-25), rather than the continuously-awake loop's three immediate attempts. The next minute's clean wake is already the retry. Feed the WDT between sources; this prevents one unavailable slow-timeout source (observed with Open-Meteo) from consuming the whole 150 s watchdog budget and blocking departures/display/RTC-state persistence.
+- **The old continuously-awake loop still exists behind `power.deep_sleep: false`**. It is not the deployed mode and is retained only as a temporary fallback until a dedicated cleanup removes the obsolete fork. Do not let fixes silently diverge between the two paths.
 - **Swedish characters (å/ä/ö/é/ü)** are transliterated to plain ASCII by `departures.parse_departures()` via `_to_ascii`. Historically forced by framebuf's ASCII-only font; with the streamed bitmap font (see "Fonts") native å/ä/ö glyphs are now feasible almost for free (add them to `gen_font.py`'s charset + stop transliterating), but not yet done — a clean follow-up.
 
 ### Screen design
@@ -220,7 +224,5 @@ Weather is now built (footer overview — see "Weather API" and "Screen design")
 - Does the ~5 mm content margin read comfortably in person (currently reasoned from an approximate dot pitch)?
 - Is ~1×/min panel refresh the right wear/freshness trade-off, or should it relax further? `full_refresh_interval_min` was relaxed 30 → 60 for 24/7 wear (2026-07-12); the every-minute *partial* (driven by the live footer clock) is still the main wear/flash driver — an even gentler render cadence (clock every 2–3 min) remains an option if longevity beats phone-synced clock feel.
 - If ghosting ever appears on the partial refresh, flip `partial_old` polarity (see "Screen refresh strategy").
-- Power: investigate optional ESP32 deep sleep while preserving differential refresh across wakes. Do not persist the 48 KB framebuffer to flash; retain a compact, validated semantic description of the displayed frame in ESP32 RTC user memory, re-render it into the one resident buffer as partial plane `0x10`, then reuse that buffer for the new `0x13` frame. Missing/corrupt/incompatible retained state safely forces one full refresh. The cadence remains one minute and wall-clock aligned (fixed above).
-- Does the admin panel return once connected in STA mode, and scoped to what (maybe just Wi-Fi re-provisioning)?
 - **Weather (new 2026-07-12)**: are the procedural glyphs legible on the panel at viewing distance (host preview looks good; owner to eyeball)? Is the three-way rain split the right resolution, or is drizzle-vs-rain-vs-heavy overkill? Is `pull_interval_min=30` right? Owner must add real `latitude`/`longitude` to `/settings.json`'s `weather` block (example uses Stockholm 59.33/18.06).
 - When/how the Homey Pro source gets added (see Future direction).

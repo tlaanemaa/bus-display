@@ -1,11 +1,15 @@
-"""Admin web server (Microdot). Today: only the AP-mode Wi-Fi setup form.
-The device config API / display settings admin panel will grow in this
-same app as those features get built (see CLAUDE.md architecture).
+"""Legacy, unused Microdot Wi-Fi setup portal.
+
+USB configuration replaced this onboarding flow. The module remains only
+as explicit cleanup debt and is never imported by the running app.
 """
 import asyncio
 import config
 import machine
 from lib.microdot import Microdot, Response
+
+if False:
+    from typing import Any
 
 app = Microdot()
 
@@ -28,12 +32,12 @@ _SAVED_PAGE = """<!doctype html>
 
 
 @app.route("/")
-async def setup_form(request):
+async def setup_form(request: "Any") -> "Any":
     return Response(body=_SETUP_FORM, headers={"Content-Type": "text/html"})
 
 
 @app.route("/save", methods=["POST"])
-async def save_wifi(request):
+async def save_wifi(request: "Any") -> "Any":
     ssid = request.form.get("ssid", "")
     password = request.form.get("password", "")
     if not ssid:
@@ -44,7 +48,7 @@ async def save_wifi(request):
     config.save(cfg)
     print("server: saved wifi config for ssid =", ssid, "-- rebooting")
 
-    async def reboot_soon():
+    async def reboot_soon() -> None:
         await asyncio.sleep(1)
         machine.reset()
 

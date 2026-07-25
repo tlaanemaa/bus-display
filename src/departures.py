@@ -1,5 +1,5 @@
 """Pure logic: parse/filter/format SL departures JSON. No hardware or
-network imports -- runs under host CPython with pytest (see CLAUDE.md
+network imports -- runs under host CPython with pytest (see AGENTS.md
 "Testability rule"). sl.py does the fetching; this module never touches
 the network.
 """
@@ -13,13 +13,16 @@ _ASCII_FALLBACK = (
     ("ü", "u"), ("Ü", "U"),
 )
 
+if False:
+    from typing import Any
 
-def _to_ascii(s):
+
+def _to_ascii(s: str) -> str:
     """framebuf's built-in font is ASCII-only; SL destination/stop names
     routinely contain Swedish a/a/o with diacritics, which otherwise draw
     as corrupted glyphs (confirmed on real hardware for "Eknäs"). Custom
     fonts that would support these natively are RAM-unviable on this
-    board (see CLAUDE.md "Key library choices" / "RAM-vs-HTTPS
+    board (see AGENTS.md "Key library choices" / "RAM-vs-HTTPS
     conflict") -- transliterating to plain ASCII is the permanent fix,
     not a stopgap."""
     for accented, plain in _ASCII_FALLBACK:
@@ -27,10 +30,10 @@ def _to_ascii(s):
     return s
 
 
-def split_hero_display(display):
+def split_hero_display(display: str) -> "tuple[str, str | None]":
     """Split an SL `display` string into (main, unit) for the hero
     treatment: the big countdown number rendered huge, with any trailing
-    unit word ("min") rendered smaller alongside it (see CLAUDE.md
+    unit word ("min") rendered smaller alongside it (see AGENTS.md
     "Screen design"). Only splits on a trailing alphabetic word -- "5
     min" -> ("5", "min"), "Nu" -> ("Nu", None) (nothing to demote), "12:34"
     -> ("12:34", None) (a clock time has no unit)."""
@@ -41,7 +44,7 @@ def split_hero_display(display):
     return display, None
 
 
-def parse_departures(raw_json):
+def parse_departures(raw_json: "dict[str, Any] | None") -> "list[dict[str, str]]":
     """raw_json: the dict returned by sl.fetch_departures() (or an
     equivalent fixture in tests) -- {"departures": [...]}. Returns a list
     of plain dicts sorted by `expected` time, or [] if raw_json is falsy

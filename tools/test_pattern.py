@@ -36,5 +36,5 @@ epd.sleep()
 print("done -- on the panel you should see a black square ONLY in the "
       "top-left corner, a thin border around the whole screen, and "
       "readable black text. If colors are inverted (mostly black screen, "
-      "missing square/border), see CLAUDE.md 'Pixel polarity' note. If "
+      "missing square/border), see AGENTS.md 'Pixel polarity' note. If "
       "nothing changes at all, check wiring and the BUSY pin first.")

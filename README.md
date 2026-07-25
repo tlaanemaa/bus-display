@@ -5,9 +5,10 @@ A DIY bus departure display: a Waveshare 7.5" e-paper panel driven by an ESP32 (
 ## Status
 
 - ✅ E-paper driver ported and confirmed working on hardware
-- ✅ Wi-Fi provisioning: connects to a saved network, or serves a setup form over its own AP if it can't
+- ✅ Minute-aligned ESP32 deep sleep with retained differential-refresh state
+- ✅ Connects to USB-configured Wi-Fi and shows an explicit offline status if unavailable
 - ✅ Fetches and displays real-time departures for a configurable, ordered list of stops — each with its next departure shown big and centered, the following two smaller
-- ⬜ Admin panel beyond Wi-Fi setup — not built yet; stop/refresh config is a local JSON file instead (see Setup)
+- ⬜ Polished onboarding — deliberately deferred; configuration currently uses local JSON over USB
 
 ## Hardware
 
@@ -30,22 +31,31 @@ esptool --port COM3 erase-flash
 esptool --port COM3 --baud 460800 write-flash 0x1000 ESP32_GENERIC-<version>.bin
 ```
 
-Configure your stops (this file is gitignored — it's not in the repo on purpose, so your stop doesn't end up in a public commit):
+Configure your stops and Wi-Fi (both local files are gitignored so private details cannot enter a public commit):
 
 ```
 cp src/settings.example.json src/settings.json
 # edit src/settings.json: your stop name(s) + SL site id(s) (find a site id via
 # `curl https://transport.integration.sl.se/v1/sites` on your host, not the device)
+
+# create src/config.json:
+# {"wifi": {"ssid": "your-network", "password": "your-password"}}
 ```
 
 Deploy:
 
 ```
-cd src && mpremote connect COM3 fs cp -r . :
-mpremote connect COM3 reset
+deploy.bat COM3
 ```
 
-On first boot (no saved Wi-Fi), the device starts an open access point, **BusDisplay-Setup**. Connect to it and go to `http://192.168.4.1` to enter your Wi-Fi credentials; the device saves them and reboots onto your network.
+Run the host checks before deploying:
+
+```
+.venv\Scripts\python -m mypy
+.venv\Scripts\python -m pytest
+```
+
+There is no setup access point. If Wi-Fi credentials are missing or the network is unavailable, the panel says so and retries on the next minute-aligned wake.
 
 ## Repo layout
 
@@ -55,4 +65,4 @@ tests/    pytest, runs on host CPython
 tools/    host-side scripts (hardware bring-up, one-off experiments)
 ```
 
-See [CLAUDE.md](CLAUDE.md) for hardware details, verified gotchas, and full architecture notes.
+See [AGENTS.md](AGENTS.md) for hardware details, verified gotchas, and full architecture notes.

@@ -2,7 +2,7 @@
 the e-paper panel WITHOUT keeping the font resident in RAM -- the whole
 reason a nicer font is viable on this board at all.
 
-Background (CLAUDE.md "RAM-vs-HTTPS conflict"): peterhinch/font_to_py
+Background (AGENTS.md "RAM-vs-HTTPS conflict"): peterhinch/font_to_py
 emits a Python module whose glyph data stays resident, and even a ~15KB
 resident font reliably crashed the live fetch/render loop allocating the
 48KB framebuffer (no PSRAM, fragmented heap; confirmed on hardware
@@ -11,7 +11,7 @@ and reads ONE glyph at a time.
 
 TWO RAM disciplines are load-bearing here, both learned the hard way on
 this PSRAM-less board where mbedtls's RSA-2048 SL handshake needs a large
-*contiguous* block that fragments away easily (CLAUDE.md "RAM-vs-HTTPS
+*contiguous* block that fragments away easily (AGENTS.md "RAM-vs-HTTPS
 conflict"):
 
   1. Never hold a font file open across a fetch -- each measure()/draw()
@@ -25,7 +25,7 @@ conflict"):
      function + the fb (no per-call lambda closures). Warm the advance
      caches once at boot (see warm() / display.warm_fonts) so nothing new
      is allocated during a draw. Deployed as bitfont.mpy so importing it
-     doesn't compile-fragment the heap either (CLAUDE.md gotchas).
+     doesn't compile-fragment the heap either (AGENTS.md gotchas).
 
 Pure enough to run under host pytest: only imports `struct`, opens a
 file, and draws through a caller-supplied `plot` callback -- no
@@ -33,6 +33,9 @@ file, and draws through a caller-supplied `plot` callback -- no
 binary format; this reader is its exact counterpart.
 """
 import struct
+
+if False:
+    from typing import Any, Callable
 
 _HDR = "<4sBBH"          # magic, height, baseline, count
 _HDR_SIZE = struct.calcsize(_HDR)
@@ -56,7 +59,7 @@ class Font:
     so callers can align differently-sized fonts on one line by matching
     baselines (see display.py's hero + unit)."""
 
-    def __init__(self, path):
+    def __init__(self, path: str) -> None:
         self.path = path
         f = open(path, "rb")
         try:
@@ -66,9 +69,11 @@ class Font:
             f.close()
         if magic != _MAGIC:
             raise ValueError("bad font magic in %s" % path)
-        self._adv = {}  # code -> advance px (cheap; bitmaps never cached)
+        self._adv = {}  # type: dict[int, int]
 
-    def _entry(self, f, code):
+    def _entry(
+        self, f: "Any", code: int,
+    ) -> "tuple[int, int, int] | None":
         """(width, advance, offset) for a codepoint, or None. Binary-
         search the on-disk index (sorted by code) via seeks on the
         already-open file `f`, reading each 8-byte entry into the shared
@@ -88,7 +93,7 @@ class Font:
                 hi = mid - 1
         return None
 
-    def warm(self, charset):
+    def warm(self, charset: str) -> None:
         """Populate the advance cache for every char in `charset`, once,
         at boot -- so later measure() calls on a live heap allocate
         nothing (see module docstring point 2)."""
@@ -102,7 +107,7 @@ class Font:
         finally:
             f.close()
 
-    def measure(self, s, tracking=0):
+    def measure(self, s: str, tracking: int = 0) -> int:
         """Total advance width of `s` in px, matching what draw() lays
         down (same tracking rule). Uses the advance cache; opens the file
         only if some char hasn't been seen yet (shouldn't happen after
@@ -129,7 +134,16 @@ class Font:
             w += tracking * (len(s) - 1)
         return w
 
-    def draw(self, s, x, y, color, fb, plot, tracking=0):
+    def draw(
+        self,
+        s: str,
+        x: int,
+        y: int,
+        color: int,
+        fb: "Any",
+        plot: "Callable[[Any, int, int, int, int], None]",
+        tracking: int = 0,
+    ) -> int:
         """Draw `s` with the top-left of its cell box at logical (x, y).
         `plot(fb, lx, ly, length, color)` fills one horizontal run -- a
         MODULE-LEVEL function (no per-call closure) that maps the run onto

@@ -1,18 +1,21 @@
 """Thin I/O wrapper: fetch departures JSON over plain HTTP from SL's
-Transport API (see CLAUDE.md "SL Transport API" -- no API key needed; HTTP
+Transport API (see AGENTS.md "SL Transport API" -- no API key needed; HTTP
 not HTTPS on purpose, see BASE_URL). All parsing/filtering/formatting logic
 lives in departures.py so it can be tested on host without a `requests`
-import (see CLAUDE.md "Testability rule").
+import (see AGENTS.md "Testability rule").
 """
 import gc
 import time
 import requests
 
+if False:
+    from typing import Any
+
 # Plain HTTP, deliberately: SL serves this endpoint over http with no
 # redirect to https (verified 2026-07-12), and doing so SKIPS THE TLS
 # HANDSHAKE ENTIRELY -- which is the whole RAM-vs-HTTPS conflict on this
 # PSRAM-less board (mbedtls's RSA-2048 cert verification intermittently
-# ran out of contiguous heap and hung/failed the fetch; see CLAUDE.md).
+# ran out of contiguous heap and hung/failed the fetch; see AGENTS.md).
 # The data is public transit times with no key or credentials, so there's
 # nothing to protect by encrypting it.
 BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
@@ -25,9 +28,16 @@ BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 RETRY_DELAY_S = 3
 
 
-def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retries=3, timeout_s=10):
+def fetch_departures(
+    site_id: "str | int",
+    transport: str = "BUS",
+    forecast: int = 60,
+    direction: "int | None" = None,
+    retries: int = 3,
+    timeout_s: int = 10,
+) -> "dict[str, Any]":
     """timeout_s bounds each attempt so a stuck request (observed
-    intermittently right after a fresh Wi-Fi connect -- see CLAUDE.md
+    intermittently right after a fresh Wi-Fi connect -- see AGENTS.md
     "Departures logic & stops") usually fails like any other network error
     instead of hanging, letting the retry/stale-data fallback take over.
     NOT a complete guarantee, though -- confirmed some hangs happen inside
@@ -35,13 +45,13 @@ def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retr
     watchdog is the actual backstop against those.
 
     direction: SL's direction_code (1 or 2) to filter server-side, keeping
-    the response small (see CLAUDE.md "SL Transport API" -- keep the JSON
+    the response small (see AGENTS.md "SL Transport API" -- keep the JSON
     small on-device). None means both directions.
     """
     url = "%s?transport=%s&forecast=%d" % (BASE_URL % site_id, transport, forecast)
     if direction is not None:
         url += "&direction=%d" % direction
-    last_err = None
+    last_err = None  # type: Exception | None
     for attempt in range(retries):
         gc.collect()
         try:
@@ -55,4 +65,5 @@ def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retr
             print("sl: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
             if attempt < retries - 1:
                 time.sleep(RETRY_DELAY_S)
+    assert last_err is not None
     raise last_err

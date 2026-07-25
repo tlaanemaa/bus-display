@@ -1,6 +1,6 @@
 """On-device smoke test for the departures screen: draws one static frame
 from sample data using the REAL display.py/departures.py (no duplicate
-layout logic here -- see CLAUDE.md "Testability rule" and the
+layout logic here -- see AGENTS.md "Testability rule" and the
 host-side tests/test_display.py) so this exercises exactly the code path
 main.py uses, minus the network fetch. Useful to eyeball a layout change
 on the real panel before wiring a change into the live loop.

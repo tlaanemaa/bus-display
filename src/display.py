@@ -1,11 +1,11 @@
 """Layout/rendering for the home (departures) screen. Draws through the
 90-degree portrait transform and stays inside the calibrated safe
-rectangle -- see CLAUDE.md "Physical mounting & drawable area". Never
+rectangle -- see AGENTS.md "Physical mounting & drawable area". Never
 draws a border/outline around the drawable area -- that's an explicit
 anti-decision recorded there; the margins below are silent layout
 bounds, not a rendered frame.
 
-Design (see CLAUDE.md "Screen design"): a kitchen-counter, glance-from-
+Design (see AGENTS.md "Screen design"): a kitchen-counter, glance-from-
 across-the-room display, not a reading surface. Top-aligned, filling the
 drawable area. Each stop gets a section: a small letter-spaced label, its
 next departure's countdown drawn huge (the "hero" -- the thing your eye
@@ -21,7 +21,7 @@ departures / footer). This replaced the old built-in-8x8-font-scaled-10x
 "Minecraft" look; the panel is 1-bit (no anti-aliasing) so smoothness
 comes purely from rendering each glyph at its true size. The earlier
 concern that a nicer font is RAM-unviable was specific to font_to_py's
-RESIDENT glyph module (CLAUDE.md "RAM-vs-HTTPS conflict"); streaming from
+RESIDENT glyph module (AGENTS.md "RAM-vs-HTTPS conflict"); streaming from
 flash sidesteps it -- resident cost is ~one glyph, and the draw window
 never overlaps the TLS fetch. Font files live in fonts/ (device) /
 src/fonts/ (host); regenerate with tools/gen_font.py.
@@ -31,6 +31,9 @@ rhythm is expressed as gaps between font cell heights (font.height),
 which are the ink-cropped cell heights baked into each .fnt.
 """
 import bitfont
+
+if False:
+    from typing import Any, Callable
 
 
 PHYS_W = 800  # native physical buffer, fixed by the panel
@@ -96,14 +99,14 @@ GAP_WEATHER_DATE = 20     # minimum gap between the weather cluster and the date
 
 
 # --- fonts: streamed from flash, opened lazily on first use (never at
-# import -- keeps the eager-import RAM discipline, CLAUDE.md). Cached so
+# import -- keeps the eager-import RAM discipline, AGENTS.md). Cached so
 # the three files open once and stay open (fds are cheap; bitmap data is
 # never held resident -- that's bitfont's whole point).
-_FONTS = {}
+_FONTS = {}  # type: dict[str, bitfont.Font]
 _FONT_FILES = {"hero": "bitter_hero.fnt", "head": "bitter_head.fnt", "row": "bitter_row.fnt"}
 
 
-def _fonts():
+def _fonts() -> "dict[str, bitfont.Font]":
     if not _FONTS:
         for role, name in _FONT_FILES.items():
             # Device runs from / with fonts at fonts/; host tests run from
@@ -119,13 +122,13 @@ def _fonts():
     return _FONTS
 
 
-def warm_fonts():
+def warm_fonts() -> None:
     """Open the fonts and fully populate their advance caches BEFORE the
     fetch/render loop starts (main.py calls this once). On a clean boot
     heap this is free; the point is that no font state then gets allocated
     during a live draw -- which, while the 48KB framebuffer is alive,
     would strand objects into the region the next SL TLS handshake needs
-    (CLAUDE.md "RAM-vs-HTTPS conflict"; bitfont.py module docstring)."""
+    (AGENTS.md "RAM-vs-HTTPS conflict"; bitfont.py module docstring)."""
     f = _fonts()
     # Printable ASCII + the degree sign (weather temps) -- any char measured
     # or drawn without being warmed here would open the font file mid-draw,
@@ -136,7 +139,9 @@ def warm_fonts():
     f["hero"].warm("0123456789:Nu ")
 
 
-def _plot_run(fb, lx, ly, n, color):
+def _plot_run(
+    fb: "Any", lx: int, ly: int, n: int, color: int,
+) -> None:
     """Fill one horizontal logical run of `n` px at (lx, ly) onto the
     physical panel -- the transform of _to_physical_rect(lx, ly, n, 1)
     inlined (no tuple allocation) and hoisted to module level (no per-draw
@@ -145,19 +150,31 @@ def _plot_run(fb, lx, ly, n, color):
     fb.fill_rect(PHYS_W - ly - 1, lx, 1, n, color)
 
 
-def _to_physical_rect(lx0, ly0, lw, lh):
+def _to_physical_rect(
+    lx0: int, ly0: int, lw: int, lh: int,
+) -> "tuple[int, int, int, int]":
     """physical.fill_rect(px0, py0, pw, ph) for a logical rect (lx0, ly0,
-    lw, lh) -- see CLAUDE.md "Physical mounting & drawable area" for the
+    lw, lh) -- see AGENTS.md "Physical mounting & drawable area" for the
     derivation. Don't re-derive; use this."""
     return PHYS_W - ly0 - lh, lx0, lh, lw
 
 
-def _fill_rect(fb, lx0, ly0, lw, lh, color):
+def _fill_rect(
+    fb: "Any", lx0: int, ly0: int, lw: int, lh: int, color: int,
+) -> None:
     px0, py0, pw, ph = _to_physical_rect(lx0, ly0, lw, lh)
     fb.fill_rect(px0, py0, pw, ph, color)
 
 
-def _text(fb, font, s, lx0, ly0, color=1, tracking=0):
+def _text(
+    fb: "Any",
+    font: bitfont.Font,
+    s: str,
+    lx0: int,
+    ly0: int,
+    color: int = 1,
+    tracking: int = 0,
+) -> int:
     """Draw `s` at logical (lx0, ly0) in `font`, streaming glyphs from
     flash. framebuf can't draw rotated glyphs, so bitfont hands us each
     glyph as horizontal runs and we map every run onto the physical panel
@@ -166,21 +183,28 @@ def _text(fb, font, s, lx0, ly0, color=1, tracking=0):
     return font.draw(s, lx0, ly0, color, fb, _plot_run, tracking)
 
 
-def _text_centered(fb, font, s, ly0, color=1):
+def _text_centered(
+    fb: "Any", font: bitfont.Font, s: str, ly0: int, color: int = 1,
+) -> None:
     lx0 = CONTENT_X0 + max(0, (CONTENT_W - font.measure(s)) // 2)
     _text(fb, font, s, lx0, ly0, color)
 
 
-def _text_right(fb, font, s, lx_right, ly0, color=1):
+def _text_right(
+    fb: "Any", font: bitfont.Font, s: str, lx_right: int, ly0: int,
+    color: int = 1,
+) -> None:
     """Draw `s` so its right edge lands on lx_right (right-aligned times)."""
     _text(fb, font, s, lx_right - font.measure(s), ly0, color)
 
 
-def _badge_w(font, s, pad_x):
+def _badge_w(font: bitfont.Font, s: str, pad_x: int) -> int:
     return font.measure(s) + 2 * pad_x
 
 
-def _truncate_to_width(font, s, max_w):
+def _truncate_to_width(
+    font: bitfont.Font, s: str, max_w: int,
+) -> str:
     """Longest prefix of `s` whose drawn width fits in max_w px (measured
     with the same font, so it matches the ink). Keeps at least one char --
     a too-narrow column is a layout bug to notice, not silently blank."""
@@ -190,7 +214,16 @@ def _truncate_to_width(font, s, max_w):
     return s[:n]
 
 
-def _badge(fb, font, s, lx0, ly0, pad_x, pad_y, radius=True):
+def _badge(
+    fb: "Any",
+    font: bitfont.Font,
+    s: str,
+    lx0: int,
+    ly0: int,
+    pad_x: int,
+    pad_y: int,
+    radius: bool = True,
+) -> "tuple[int, int]":
     """A line-number badge: filled black pill with the number knocked out
     in white (color 0) -- reads like a bus blind and gives hierarchy
     without any gray (the panel is 1-bit). Returns (bw, bh) so callers
@@ -216,7 +249,9 @@ def _badge(fb, font, s, lx0, ly0, pad_x, pad_y, radius=True):
 # by string, kept in sync there). Each drawer fills a square (x, y, s, s)
 # logical box; s is tuned to sit on the footer next to the temperature.
 
-def _box(fb, lx, ly, lw, lh, color):
+def _box(
+    fb: "Any", lx: int, ly: int, lw: int, lh: int, color: int,
+) -> None:
     """Filled logical rect via per-row _plot_run -- allocation-free, unlike
     _fill_rect (which builds a tuple). For the glyph drawers only."""
     if lw <= 0 or lh <= 0:
@@ -225,7 +260,7 @@ def _box(fb, lx, ly, lw, lh, color):
         _plot_run(fb, lx, ly + i, lw, color)
 
 
-def _disc(fb, cx, cy, r, color):
+def _disc(fb: "Any", cx: int, cy: int, r: int, color: int) -> None:
     """Filled circle by integer scanline (no float, no alloc): each row's
     half-width is the largest dx with dx*dx + dy*dy <= r*r."""
     rr = r * r
@@ -238,7 +273,9 @@ def _disc(fb, cx, cy, r, color):
         dy += 1
 
 
-def _seg(fb, x0, y0, x1, y1, t, color):
+def _seg(
+    fb: "Any", x0: int, y0: int, x1: int, y1: int, t: int, color: int,
+) -> None:
     """Thick short segment as a run of t-by-t boxes stepped along the line
     (integer Lerp; fine for the few px these glyphs need)."""
     dx = x1 - x0
@@ -253,7 +290,9 @@ def _seg(fb, x0, y0, x1, y1, t, color):
         _box(fb, px - h, py - h, t, t, color)
 
 
-def _cloud(fb, x, y, w, h, color):
+def _cloud(
+    fb: "Any", x: int, y: int, w: int, h: int, color: int,
+) -> None:
     """Lumpy cloud with a flattish bottom: three bumps (discs) over a base
     slab, all bottoms landing on one line so the underside reads straight."""
     bottom = y + (h * 82) // 100
@@ -270,7 +309,9 @@ def _cloud(fb, x, y, w, h, color):
     _box(fb, cxL, slab_top, cxR - cxL, bottom - slab_top, color)
 
 
-def _draw_sun(fb, x, y, s, color=1):
+def _draw_sun(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     cx = x + s // 2
     cy = y + s // 2
     r = (s * 24) // 100
@@ -290,16 +331,22 @@ def _draw_sun(fb, x, y, s, color=1):
     _seg(fb, cx - d1, cy - d1, cx - d2, cy - d2, t, color)
 
 
-def _draw_partly(fb, x, y, s, color=1):
+def _draw_partly(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     _draw_sun(fb, x - (s * 4) // 100, y - (s * 10) // 100, (s * 60) // 100, color)
     _cloud(fb, x + (s * 18) // 100, y + (s * 30) // 100, (s * 82) // 100, (s * 60) // 100, color)
 
 
-def _draw_cloudy(fb, x, y, s, color=1):
+def _draw_cloudy(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     _cloud(fb, x, y + (s * 8) // 100, s, (s * 78) // 100, color)
 
 
-def _draw_fog(fb, x, y, s, color=1):
+def _draw_fog(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     _cloud(fb, x, y - (s * 6) // 100, s, (s * 58) // 100, color)
     t = max(2, (s * 7) // 100)
     for i, fy in enumerate((66, 82, 98)):
@@ -308,7 +355,9 @@ def _draw_fog(fb, x, y, s, color=1):
         _box(fb, x + inset, yy, s - 2 * inset, t, color)
 
 
-def _draw_drizzle(fb, x, y, s, color=1):
+def _draw_drizzle(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     """Light rain: a scatter of small dots -- reads as spitting/drizzle,
     clearly lighter than the streaks of _draw_rain."""
     _cloud(fb, x, y, s, (s * 62) // 100, color)
@@ -317,7 +366,9 @@ def _draw_drizzle(fb, x, y, s, color=1):
         _disc(fb, x + (s * fx) // 100, y + (s * fy) // 100, r, color)
 
 
-def _draw_rain(fb, x, y, s, color=1):
+def _draw_rain(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     _cloud(fb, x, y, s, (s * 62) // 100, color)
     t = max(2, (s * 7) // 100)
     top = y + (s * 66) // 100
@@ -327,7 +378,9 @@ def _draw_rain(fb, x, y, s, color=1):
         _seg(fb, sx, top, sx - (s * 9) // 100, bot, t, color)
 
 
-def _draw_rain_heavy(fb, x, y, s, color=1):
+def _draw_rain_heavy(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     """Heavy rain: four longer, thicker streaks packed tighter -- the
     'bucketing down, take the umbrella' state."""
     _cloud(fb, x, y, s, (s * 60) // 100, color)
@@ -339,7 +392,9 @@ def _draw_rain_heavy(fb, x, y, s, color=1):
         _seg(fb, sx, top, sx - (s * 11) // 100, bot, t, color)
 
 
-def _draw_snow(fb, x, y, s, color=1):
+def _draw_snow(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     _cloud(fb, x, y, s, (s * 62) // 100, color)
     t = max(2, (s * 4) // 100)   # thin arms so the star stays open, not a blob
     a = (s * 7) // 100
@@ -352,7 +407,9 @@ def _draw_snow(fb, x, y, s, color=1):
         _seg(fb, cx - a, cy + a, cx + a, cy - a, t, color)
 
 
-def _draw_thunder(fb, x, y, s, color=1):
+def _draw_thunder(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     _cloud(fb, x, y, s, (s * 62) // 100, color)
     t = max(3, (s * 9) // 100)
     x0 = x + (s * 56) // 100
@@ -368,7 +425,9 @@ def _draw_thunder(fb, x, y, s, color=1):
     _seg(fb, x1, y1, x2, y2, t, color)
 
 
-def _draw_drop(fb, x, y, s, color=1):
+def _draw_drop(
+    fb: "Any", x: int, y: int, s: int, color: int = 1,
+) -> None:
     """Small teardrop for the precipitation cue: a round belly with the
     point well ABOVE it (a smaller disc set low so the taper stays visible)."""
     r = (s * 34) // 100
@@ -394,13 +453,17 @@ _WEATHER_DRAWERS = {
 }
 
 
-def draw_weather_glyph(fb, condition, x, y, s, color=1):
+def draw_weather_glyph(
+    fb: "Any", condition: str, x: int, y: int, s: int, color: int = 1,
+) -> None:
     """Draw the icon for a weather condition string (weather.py's
     constants) in the (x, y, s, s) logical box. Unknown -> cloudy."""
     _WEATHER_DRAWERS.get(condition, _draw_cloudy)(fb, x, y, s, color)
 
 
-def stop_section(name, deps, stale=False):
+def stop_section(
+    name: str, deps: "list[dict[str, str]]", stale: bool = False,
+) -> "dict[str, Any]":
     """Pure: content for one stop's section (no drawing) -- the hero
     departure split into (main, unit) for the two-size hero treatment,
     its route badge + destination (truncated to fit at head size), and
@@ -441,7 +504,7 @@ def stop_section(name, deps, stale=False):
             "badge_line": badge_line, "dest": dest, "rows": rows, "stale": stale}
 
 
-def section_lines(section):
+def section_lines(section: "dict[str, Any]") -> "list[str]":
     """Flat list of every text string a section contains, in display
     order -- used for change-detection and serial logging."""
     lines = [section["name"] + (" STALE" if section.get("stale") else "")]
@@ -454,7 +517,7 @@ def section_lines(section):
     return lines
 
 
-def footer_lines(date_str, time_str):
+def footer_lines(date_str: str, time_str: str) -> "list[str]":
     """Pure: footnote text -- just the current local date/time. One row if
     it fits at row size, else two. Staleness is NOT shown here anymore -- it
     gets a per-stop STALE badge after the stop name instead (see
@@ -467,20 +530,24 @@ def footer_lines(date_str, time_str):
     return [date_str, time_str]
 
 
-def _footer_line_height():
+def _footer_line_height() -> int:
     """Height of the single footer status line -- the glyph box, which is a
     touch taller than the row text it sits beside."""
     return _fonts()["row"].height + WEATHER_ICON_PAD
 
 
-def _weather_cluster_width(row_f, wi, temps, precip):
+def _weather_cluster_width(
+    row_f: bitfont.Font, wi: int, temps: str, precip: "str | None",
+) -> int:
     w = wi + GAP_WEATHER_ICON + row_f.measure(temps)
     if precip:
         w += GAP_TEMP_PRECIP + wi // 2 + GAP_DROP_PRECIP + row_f.measure(precip)
     return w
 
 
-def _draw_footer_status_line(fb, weather, datetime_str, ly):
+def _draw_footer_status_line(
+    fb: "Any", weather: "dict[str, Any]", datetime_str: str, ly: int,
+) -> None:
     """Draw the one-line footer at logical y `ly`: the weather cluster
     (condition glyph + high/low + optional rain %) left-aligned, the
     date/time right-aligned, everything vertically centered on the glyph-box
@@ -513,12 +580,14 @@ def _draw_footer_status_line(fb, weather, datetime_str, ly):
     _text_right(fb, row_f, datetime_str, CONTENT_X0 + CONTENT_W, ty)
 
 
-def _draw_footer_error_line(fb, message, datetime_str, ly):
+def _draw_footer_error_line(
+    fb: "Any", message: str, datetime_str: str, ly: int,
+) -> None:
     """Same one-line footer band as _draw_footer_status_line, but for when
     the weather fetch itself failed: showing the last-good reading next to
     a live clock would look current when it isn't, so this replaces the
     whole weather cluster with a plain text message instead (same reasoning
-    as the per-stop STALE badge -- CLAUDE.md "Departures logic & stops")."""
+    as the per-stop STALE badge -- AGENTS.md "Departures logic & stops")."""
     row_f = _fonts()["row"]
     wi = _footer_line_height()
     ty = ly + (wi - row_f.height) // 2
@@ -530,7 +599,12 @@ WEATHER_ERROR = "error"  # sentinel for the `weather` param: fetch failed, show 
 WIFI_ERROR = "wifi_error"  # no network: make an unattended wall display explicitly honest
 
 
-def draw_home(fb, sections, footer, weather=None):
+def draw_home(
+    fb: "Any",
+    sections: "list[dict[str, Any]]",
+    footer: "list[str]",
+    weather: "dict[str, Any] | str | None" = None,
+) -> "tuple[int, int]":
     """Draws each stop's section (from stop_section()) top-to-bottom, then the
     footer (from footer_lines(), plus weather) anchored near the bottom. A
     stop whose data is stale gets a STALE badge after its name. `weather` is
@@ -538,7 +612,7 @@ def draw_home(fb, sections, footer, weather=None):
     show "Weather error" in place of the cluster (fetch failed -- don't show
     a possibly-old reading as current), or None/falsy to fall back to a plain
     centered date/time (weather disabled). Logs everything to serial
-    (CLAUDE.md "make the code corroborate the screen"). Returns
+    (AGENTS.md "make the code corroborate the screen"). Returns
     (content_bottom, footer_top) logical-y coordinates so callers/tests can
     check content didn't grow into the footer."""
     f = _fonts()
@@ -612,7 +686,7 @@ def draw_home(fb, sections, footer, weather=None):
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
         _draw_footer_error_line(fb, "Weather error", " ".join(footer), footer_top)
-    elif weather:
+    elif isinstance(weather, dict):
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
         _draw_footer_status_line(fb, weather, " ".join(footer), footer_top)
@@ -628,9 +702,11 @@ def draw_home(fb, sections, footer, weather=None):
         weather_summary = "wifi: unavailable"
     elif weather == WEATHER_ERROR:
         weather_summary = "weather: error"
-    else:
+    elif isinstance(weather, dict) or weather is None:
         import weather as wx
         weather_summary = wx.summary_text(weather)
+    else:
+        weather_summary = "weather: unavailable"
     print("display: home screen -- " + " | ".join(logged) + " || "
           + " | ".join(footer) + " || " + weather_summary)
     # Returned so callers/tests can assert content didn't run into the footer

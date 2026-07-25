@@ -1,6 +1,6 @@
 """Calibration guide, v2 -- zeroing in on the picture frame's visible-area
 cutoff. NOT part of the app. The panel is mounted rotated for portrait
-viewing (same 90-degree transform as src/display.py -- see CLAUDE.md
+viewing (same 90-degree transform as src/display.py -- see AGENTS.md
 "Physical mounting & drawable area" for the derivation).
 
 v1 (tick ruler on all 4 edges) gave rough readings: left barely visible

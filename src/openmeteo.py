@@ -1,7 +1,7 @@
 """Thin I/O wrapper: fetch today's forecast JSON over plain HTTP from
 Open-Meteo (no API key, like SL; HTTP not HTTPS -- see BASE_URL). All
 parsing lives in weather.py so it
-can be tested on host without a `requests` import (CLAUDE.md "Testability
+can be tested on host without a `requests` import (AGENTS.md "Testability
 rule"). Mirrors sl.py deliberately -- same retry/timeout shape.
 
 Only today's daily + hourly fields are requested (forecast_days=1, so 24
@@ -12,9 +12,12 @@ import gc
 import time
 import requests
 
+if False:
+    from typing import Any
+
 # Plain HTTP, like sl.py (verified http with no https redirect 2026-07-12):
 # skipping the TLS handshake avoids the mbedtls contiguous-RAM starvation
-# that plagues this board (see CLAUDE.md "RAM-vs-HTTPS conflict"). Public
+# that plagues this board (see AGENTS.md "RAM-vs-HTTPS conflict"). Public
 # weather data, no key -- nothing to protect.
 BASE_URL = "http://api.open-meteo.com/v1/forecast"
 # weather_code and precip move to hourly (see weather.py header) so the
@@ -30,7 +33,12 @@ _HOURLY = "weather_code,precipitation_probability"
 RETRY_DELAY_S = 3
 
 
-def fetch_today(latitude, longitude, retries=3, timeout_s=10):
+def fetch_today(
+    latitude: "str | float",
+    longitude: "str | float",
+    retries: int = 3,
+    timeout_s: int = 10,
+) -> "dict[str, Any]":
     """Today's forecast for a lat/lon. timeout_s bounds each attempt like
     sl.fetch_departures (same intermittent-hang caveat -- main.py's watchdog
     is the real backstop). Returns the raw Open-Meteo dict;
@@ -42,7 +50,7 @@ def fetch_today(latitude, longitude, retries=3, timeout_s=10):
     would be off for a chunk of the day."""
     url = "%s?latitude=%s&longitude=%s&daily=%s&hourly=%s&timezone=auto&forecast_days=1" % (
         BASE_URL, latitude, longitude, _DAILY, _HOURLY)
-    last_err = None
+    last_err = None  # type: Exception | None
     for attempt in range(retries):
         gc.collect()
         try:
@@ -56,4 +64,5 @@ def fetch_today(latitude, longitude, retries=3, timeout_s=10):
             print("openmeteo: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
             if attempt < retries - 1:
                 time.sleep(RETRY_DELAY_S)
+    assert last_err is not None
     raise last_err

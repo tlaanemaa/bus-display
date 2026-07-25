@@ -1,6 +1,6 @@
 """Host-side tests for the pure parse/filter/format logic in departures.py.
 Fixtures below are trimmed real shapes from SL's departures endpoint
-(GET /v1/sites/{siteId}/departures) -- see CLAUDE.md "SL Transport API".
+(GET /v1/sites/{siteId}/departures) -- see AGENTS.md "SL Transport API".
 """
 import departures
 

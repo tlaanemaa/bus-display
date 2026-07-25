@@ -1,12 +1,12 @@
 """Pure logic: turn an Open-Meteo forecast JSON into the small "today"
 summary the footer draws -- condition bucket, high/low, precipitation
 chance. No hardware or network imports, so it runs under host pytest (see
-CLAUDE.md "Testability rule"); openmeteo.py does the fetching.
+AGENTS.md "Testability rule"); openmeteo.py does the fetching.
 
 Why Open-Meteo and not SMHI (the obvious Swedish source): SMHI's point
 forecast returns the whole multi-day hourly series (100KB+), and parsing
 that on this PSRAM-less board reruns the RAM-vs-HTTPS fight the SL fetch
-already had to win (CLAUDE.md "RAM-vs-HTTPS conflict"). Open-Meteo lets us
+already had to win (AGENTS.md "RAM-vs-HTTPS conflict"). Open-Meteo lets us
 request ONLY today's daily + hourly fields -> a couple KB. Keyless, same
 as SL.
 
@@ -24,6 +24,9 @@ FULL 24h day, so a single overcast or drizzly hour at 3 AM reported
 hostage by hours nobody's awake for. Computing our own mode/max over only
 07:00-23:00 fixes that; temps stay on the daily block (the overnight low
 is still relevant for dressing)."""
+
+if False:
+    from typing import Any
 
 
 # WMO weather interpretation codes -> our glyph buckets. Ranges collapsed
@@ -49,7 +52,7 @@ _CODE = {
 }
 
 
-def condition_for_code(code):
+def condition_for_code(code: "Any") -> str:
     """WMO code -> a glyph bucket string (display._WEATHER_DRAWERS key).
     Unknown/missing codes -> "cloudy" (a safe, non-alarming default)."""
     try:
@@ -75,26 +78,33 @@ _SEVERITY = {
 }
 
 
-def dominant_condition(codes):
+def dominant_condition(codes: "list[Any]") -> str:
     """Most common glyph bucket among a list of hourly WMO codes (already
     restricted to the daytime window by the caller). Votes on the BUCKET
     (condition_for_code(c)), not the raw code, so e.g. slight vs moderate
     rain don't split the count. Ties broken by _SEVERITY (see above).
     Empty input -> "cloudy" (safe default, same as an unknown code)."""
-    counts = {}
+    counts = {}  # type: dict[str, int]
     for c in codes:
         bucket = condition_for_code(c)
         counts[bucket] = counts.get(bucket, 0) + 1
-    best = None
+    best = None  # type: str | None
     best_count = -1
     for bucket, n in counts.items():
-        if n > best_count or (n == best_count and _SEVERITY.get(bucket, 0) > _SEVERITY.get(best, 0)):
+        if n > best_count or (
+            n == best_count
+            and _SEVERITY.get(bucket, 0) > (
+                _SEVERITY.get(best, 0) if best is not None else 0
+            )
+        ):
             best = bucket
             best_count = n
     return best if best is not None else "cloudy"
 
 
-def _daytime_hourly(hourly):
+def _daytime_hourly(
+    hourly: "dict[str, Any]",
+) -> "tuple[list[Any], list[Any]]":
     """Pick (weather_code, precipitation_probability) pairs from an
     Open-Meteo `hourly` block whose local timestamp falls in the daytime
     window. `hourly["time"]` entries look like "2026-07-13T14:00" (local,
@@ -124,7 +134,7 @@ def _daytime_hourly(hourly):
     return picked_codes, picked_precips
 
 
-def _first(daily, key):
+def _first(daily: "dict[str, Any]", key: str) -> "Any | None":
     """First (today's) value of an Open-Meteo daily array, or None."""
     v = daily.get(key)
     if isinstance(v, list) and v:
@@ -132,7 +142,9 @@ def _first(daily, key):
     return None
 
 
-def parse_weather(raw_json):
+def parse_weather(
+    raw_json: "dict[str, Any] | None",
+) -> "dict[str, Any] | None":
     """raw_json: Open-Meteo response with `daily` (temps) and `hourly`
     (weather_code, precipitation_probability) blocks requested for a
     single day (forecast_days=1). Returns a small dict --
@@ -172,16 +184,25 @@ def parse_weather(raw_json):
     }
 
 
-def is_for_today(reading, today_iso):
+def is_for_today(
+    reading: "dict[str, Any] | None", today_iso: str,
+) -> bool:
     """True if a parsed reading (from parse_weather) is still TODAY's forecast
     -- its `date` matches `today_iso` (local 'YYYY-MM-DD'). A missing reading,
     or a missing/prior-day date, is not today -> False (covers the across-
     midnight case). This is the OUTER guard; keep_last_good adds a freshness
     bound on top (see below)."""
-    return bool(reading) and reading.get("date") == today_iso
+    if not reading:
+        return False
+    return reading.get("date") == today_iso
 
 
-def keep_last_good(reading, today_iso, age_s, max_age_s):
+def keep_last_good(
+    reading: "dict[str, Any] | None",
+    today_iso: str,
+    age_s: "float | None",
+    max_age_s: float,
+) -> bool:
     """Decide whether a failed/unusable weather pull should KEEP showing
     `reading` instead of falling back to the explicit "Weather error".
 
@@ -202,7 +223,7 @@ def keep_last_good(reading, today_iso, age_s, max_age_s):
     return is_for_today(reading, today_iso) and age_s <= max_age_s
 
 
-def format_temps(weather):
+def format_temps(weather: "dict[str, Any]") -> str:
     """High/low as one string, e.g. "6° / 12°" -- low first (the
     number that decides the jacket), matching the mockup."""
     return "%d° / %d°" % (weather["tmin"], weather["tmax"])
@@ -216,7 +237,7 @@ def format_temps(weather):
 PRECIP_SHOW_THRESHOLD = 10
 
 
-def format_precip(weather):
+def format_precip(weather: "dict[str, Any]") -> "str | None":
     """Precipitation cue string (e.g. "60%"), or None when it's low enough
     to omit -- see PRECIP_SHOW_THRESHOLD."""
     p = weather.get("precip")
@@ -225,9 +246,9 @@ def format_precip(weather):
     return "%d%%" % p
 
 
-def summary_text(weather):
+def summary_text(weather: "dict[str, Any] | None") -> str:
     """One compact line for serial logging + render change-detection
-    (CLAUDE.md "make the code corroborate the screen"). Not drawn."""
+    (AGENTS.md "make the code corroborate the screen"). Not drawn."""
     if not weather:
         return "weather: n/a"
     p = format_precip(weather)

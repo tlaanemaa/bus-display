@@ -7,7 +7,7 @@ Why a custom binary format instead of peterhinch/font_to_py: font_to_py
 emits a Python *module* whose glyph data stays RESIDENT in RAM, and even
 a ~15KB resident font reliably crashed this board's live fetch/render
 loop while allocating the 48KB framebuffer (no PSRAM, fragmented heap --
-see CLAUDE.md "RAM-vs-HTTPS conflict", confirmed on hardware 2026-07-11).
+see AGENTS.md "RAM-vs-HTTPS conflict", confirmed on hardware 2026-07-11).
 This format instead keeps the whole font on flash (4MB, cheap) and the
 device reads one glyph at a time (resident cost ~= one glyph). That is
 the entire reason a smoother font is viable here at all.

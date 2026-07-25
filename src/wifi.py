@@ -1,8 +1,7 @@
-"""Wi-Fi: STA connect with timeout, AP-mode fallback for provisioning.
+"""Wi-Fi STA connect/reconnect, plus an unused legacy setup-AP helper.
 
-Verified against this board's firmware (MicroPython v1.28.0 ESP32_GENERIC,
-2026-07-04): WLAN.config(essid=..., security=0) sets an open AP, and the
-AP interface's default address is 192.168.4.1.
+Configuration is now USB-only. `start_ap()` remains solely as cleanup debt
+until the deprecated onboarding flow is removed.
 """
 import network
 import time
@@ -11,7 +10,9 @@ AP_SSID = "BusDisplay-Setup"
 STA_TIMEOUT_MS = 15000
 
 
-def connect_sta(ssid, password, timeout_ms=STA_TIMEOUT_MS):
+def connect_sta(
+    ssid: str, password: str, timeout_ms: int = STA_TIMEOUT_MS,
+) -> bool:
     """Try to join `ssid`. Returns True on success, False on timeout."""
     sta = network.WLAN(network.STA_IF)
     sta.active(True)
@@ -28,7 +29,9 @@ def connect_sta(ssid, password, timeout_ms=STA_TIMEOUT_MS):
     return True
 
 
-def reconnect(ssid, password, timeout_ms=STA_TIMEOUT_MS):
+def reconnect(
+    ssid: str, password: str, timeout_ms: int = STA_TIMEOUT_MS,
+) -> bool:
     """Re-establish a dropped STA link and return True once connected.
 
     The ESP32 usually auto-reconnects to a known AP on its own, but the most
@@ -50,8 +53,8 @@ def reconnect(ssid, password, timeout_ms=STA_TIMEOUT_MS):
     return connect_sta(ssid, password, timeout_ms)
 
 
-def start_ap():
-    """Bring up the open setup AP. Returns the WLAN AP interface."""
+def start_ap() -> "object":
+    """Legacy unused setup helper. Bring up and return the open AP."""
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     ap.config(essid=AP_SSID, security=0)  # open network -- setup only, temporary

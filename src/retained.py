@@ -10,11 +10,14 @@ caller owns machine.RTC().memory().
 """
 import json
 
+if False:
+    from typing import Any
+
 MAGIC = b"BD1:"
 MAX_BYTES = 2048  # ESP32 MicroPython RTC user-memory limit
 
 
-def _checksum(data):
+def _checksum(data: bytes) -> int:
     # Small allocation-free checksum. This is corruption detection, not
     # authentication; versioning handles incompatible firmware layouts.
     value = 1
@@ -23,7 +26,7 @@ def _checksum(data):
     return value
 
 
-def encode(state):
+def encode(state: "dict[str, Any]") -> bytes:
     body = json.dumps(state).encode("utf-8")
     raw = MAGIC + ("%08x:" % _checksum(body)).encode("ascii") + body
     if len(raw) > MAX_BYTES:
@@ -31,7 +34,7 @@ def encode(state):
     return raw
 
 
-def decode(raw):
+def decode(raw: bytes) -> "dict[str, Any] | None":
     try:
         if not raw or not raw.startswith(MAGIC):
             return None

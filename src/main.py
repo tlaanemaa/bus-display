@@ -1,19 +1,20 @@
 """Entry point: boot flow, asyncio loop.
 
-Boot flow (see CLAUDE.md "Architecture"): load /config.json (Wi-Fi creds
-only) -> try Wi-Fi STA -> on success, NTP sync, then load /settings.json
-(stop ids, direction filter, refresh cadence -- see settings.py) and go
-straight into the departures home display; on failure, start the AP-mode
-setup portal instead.
+Boot flow (see AGENTS.md "Architecture"): load /settings.json and
+/config.json, restore validated semantic display state from RTC memory,
+try Wi-Fi STA, wait for the wall-minute request boundary, fetch/render,
+save retained state, then enter ESP32 deep sleep. Missing Wi-Fi is shown
+explicitly on the panel and retried on the next wake; configuration is
+over USB, with no setup portal.
 
 /settings.json is NOT committed to git (see .gitignore) so the owner's
 home stop doesn't end up in a public repo -- copy src/settings.example.json
-to src/settings.json, fill in your stop(s) (see CLAUDE.md "Departures
+to src/settings.json, fill in your stop(s) (see AGENTS.md "Departures
 logic & stops" for how to find a site id), then deploy it like any other
 file: `mpremote connect COM3 fs cp src/settings.json :settings.json`.
 
 The 48KB framebuffer is allocated ONCE at boot (in display_loop) and kept
-resident, reused for every refresh -- see CLAUDE.md "RAM-vs-HTTPS conflict
+resident, reused for every refresh -- see AGENTS.md "RAM-vs-HTTPS conflict
 (RESOLVED)". This reverses an earlier design: the framebuffer used to be
 allocated transiently, per cycle, ONLY because a resident buffer starved
 the SL TLS handshake (mbedtls's RSA-2048 cert verification needs a large
@@ -22,11 +23,9 @@ contiguous block). Now that SL and Open-Meteo are fetched over plain HTTP
 is also more robust, since a fresh 48KB alloc had begun to MemoryError on
 later cycles as the heap fragmented (MicroPython's GC never compacts).
 
-The admin server (Microdot) is still not imported once connected --
-`server.py` builds its whole app + route table at import time (~30KB+)
-regardless of whether start_server() is ever called, and an unused import
-whose top-level code does real work isn't free. It's deferred into the
-AP-mode branch below where it's actually needed (Wi-Fi setup only).
+The legacy Microdot setup server is not imported or used. It remains in
+the tree only as known cleanup debt; importing it would build an unused
+route table and waste scarce RAM.
 """
 import framebuf
 import network
@@ -50,18 +49,15 @@ import retained
 import wake_schedule
 from epd7in5v2 import EPD7in5V2
 
-# `server` (Microdot) is deliberately NOT imported here -- server.py builds
-# its whole Microdot app + route table at import time (~30KB+ resident). It's
-# only ever needed in AP-mode setup, so it's imported lazily inside that
-# branch of main() below. General lesson (it historically also starved the
-# TLS fetch, now moot with HTTP): an unused import isn't free if its
-# top-level code does real work -- confirmed by isolating the import as the
-# difference between a script that fetched
-# reliably and the real main.py hanging on every single fresh boot.
+if False:
+    from typing import Any
+
+# `server` (Microdot) is deliberately not imported: USB configuration
+# replaced the setup portal, and its top-level route construction costs RAM.
 
 WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_loop iteration ever takes
                              # longer than this -- a general hang backstop. The TLS hang it was originally
-                             # for is now moot (fetches are plain HTTP, see CLAUDE.md "RAM-vs-HTTPS conflict
+                             # for is now moot (fetches are plain HTTP, see AGENTS.md "RAM-vs-HTTPS conflict
                              # (RESOLVED)"), so this should rarely fire, but a stuck socket read or driver
                              # busy-wait could still hang an iteration. 150s gives headroom over the worst
                              # legitimate case with 2 configured stops: one fetch's worst case is
@@ -86,15 +82,17 @@ _FB_HEIGHT = 480
 _WIFI_RECONNECT_AFTER_FAILS = 3
 
 
-def _fetch_all_stops(cfg, retries=3, wdt=None):
+def _fetch_all_stops(
+    cfg: "dict[str, Any]", retries: int = 3, wdt: "Any | None" = None,
+) -> "list[list[dict[str, str]] | None]":
     """Fetch every configured stop independently, in the order given in
     settings.json -- no primary/fallback/suitability logic anymore, just
-    an ordered list of stops the owner cares about (see CLAUDE.md
+    an ordered list of stops the owner cares about (see AGENTS.md
     "Departures logic & stops"). Returns a list, one entry per stop: the
     stop's next cfg["departures_per_stop"] departures, or None if this
     stop's fetch failed this cycle (caller falls back to that stop's own
     cached data)."""
-    results = []
+    results = []  # type: list[list[dict[str, str]] | None]
     for stop in cfg["stops"]:
         if wdt is not None:
             wdt.feed()
@@ -112,7 +110,7 @@ def _fetch_all_stops(cfg, retries=3, wdt=None):
     return results
 
 
-def _seconds_to_next_tick(interval_s):
+def _seconds_to_next_tick(interval_s: int) -> int:
     """Seconds to sleep so the next wake lands on the next wall-clock multiple
     of interval_s -- e.g. interval 60 wakes at the top of each minute
     (HH:MM:00), not 60s after boot, so the on-screen clock flips in step with
@@ -132,7 +130,7 @@ def _seconds_to_next_tick(interval_s):
     return interval_s - (int(time.time()) % interval_s)
 
 
-async def _sleep_until_next_tick(wdt, interval_s):
+async def _sleep_until_next_tick(wdt: "Any", interval_s: int) -> None:
     """Await the next wall-clock-aligned tick (see _seconds_to_next_tick),
     feeding the watchdog every _WDT_FEED_CHUNK_S so a render interval longer
     than the WDT window doesn't trip a spurious reboot during a normal idle
@@ -146,7 +144,7 @@ async def _sleep_until_next_tick(wdt, interval_s):
         remaining -= chunk
 
 
-def _local_now_strings():
+def _local_now_strings() -> "tuple[str, str]":
     """(date_str, time_str) for the device's current local (Stockholm)
     time, computed from the NTP-synced UTC clock -- see localtime.py."""
     y, mo, d, h, mi, s, _weekday, _yday = time.gmtime()[:8]
@@ -154,7 +152,7 @@ def _local_now_strings():
     return localtime.format_date(ly, lmo, ld), localtime.format_time(lh, lmi)
 
 
-def _local_today_iso():
+def _local_today_iso() -> str:
     """Current local (Stockholm) date as 'YYYY-MM-DD' -- the same format as
     Open-Meteo's forecast date (weather.parse_weather's 'date'), so a kept
     last-good weather reading can be checked for being still today's. Assumes
@@ -166,7 +164,7 @@ def _local_today_iso():
     return "%04d-%02d-%02d" % (ly, lmo, ld)
 
 
-def _safe_sleep(epd):
+def _safe_sleep(epd: EPD7in5V2) -> None:
     """Best-effort panel power-down, called from a finally so a mid-refresh
     error never leaves the panel powered/active between cycles (e-paper rule
     1 -- leaving it active degrades it). Swallows its own error so it can't
@@ -178,12 +176,19 @@ def _safe_sleep(epd):
         print("display: panel sleep after a refresh error also failed:", e)
 
 
-def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
+def _draw_and_refresh(
+    epd: EPD7in5V2,
+    fb: "Any",
+    fb_buf: bytearray,
+    frame: "Any",
+    prev_frame: "Any | None",
+    full: bool,
+) -> None:
     """Draws `frame` into the RESIDENT framebuffer (fb/fb_buf, allocated once
     at boot and passed in -- see display_loop) and pushes it to the panel.
 
     The framebuffer used to be allocated transiently, per cycle, ONLY because
-    a resident 48KB buffer starved the SL TLS handshake (CLAUDE.md "RAM-vs-
+    a resident 48KB buffer starved the SL TLS handshake (AGENTS.md "RAM-vs-
     HTTPS conflict"). Now that SL and Open-Meteo are fetched over plain HTTP,
     nothing does a TLS handshake, so no big contiguous block is contended --
     a single resident buffer is both safe and BETTER: a fresh 48KB alloc had
@@ -195,7 +200,7 @@ def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
     (sections, footer, weather). `prev_frame` is the previously-drawn frame,
     needed as the differential partial's 0x10 old plane.
 
-    `full` picks the refresh mode (see CLAUDE.md "Screen refresh strategy"):
+    `full` picks the refresh mode (see AGENTS.md "Screen refresh strategy"):
     a full refresh flashes black/white and fully discharges every pixel
     (clears ghosting); a partial refresh is near-instant with no flash.
 
@@ -223,6 +228,7 @@ def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
     # Differential partial: old plane (0x10) first, then new plane (0x13).
     # init_part() powers the panel, so the whole sequence (including the
     # draw_home re-renders between planes) is inside the try -> always slept.
+    assert prev_frame is not None
     try:
         epd.init_part()
         epd.partial_begin()
@@ -234,7 +240,7 @@ def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
         _safe_sleep(epd)
 
 
-async def _wait_until_epoch(wdt, target_epoch):
+async def _wait_until_epoch(wdt: "Any", target_epoch: int) -> None:
     """Keep the ESP32 awake but idle until the request boundary."""
     while True:
         remaining = int(target_epoch - time.time())
@@ -244,7 +250,7 @@ async def _wait_until_epoch(wdt, target_epoch):
         await asyncio.sleep(remaining if remaining < _WDT_FEED_CHUNK_S else _WDT_FEED_CHUNK_S)
 
 
-def _rtc_state_load():
+def _rtc_state_load() -> "dict[str, Any] | None":
     raw = machine.RTC().memory()
     state = retained.decode(raw)
     if state is None:
@@ -255,7 +261,7 @@ def _rtc_state_load():
     return state
 
 
-def _rtc_state_save(state):
+def _rtc_state_save(state: "dict[str, Any]") -> None:
     """Write and read back before sleeping; never silently trust retention."""
     raw = retained.encode(state)
     rtc = machine.RTC()
@@ -270,7 +276,9 @@ def _rtc_state_save(state):
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
 
 
-def _stale_section(cfg_stop, previous):
+def _stale_section(
+    cfg_stop: "dict[str, Any]", previous: "dict[str, Any] | None",
+) -> "dict[str, Any]":
     if previous:
         section = dict(previous)
         section["stale"] = True
@@ -278,7 +286,14 @@ def _stale_section(cfg_stop, previous):
     return display.stop_section(cfg_stop["name"], [], stale=True)
 
 
-async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_ticks):
+async def deep_sleep_cycle(
+    cfg: "dict[str, Any]",
+    wifi_cfg: "dict[str, Any] | None",
+    connected: bool,
+    state: "dict[str, Any] | None",
+    request_epoch: int,
+    boot_ticks: int,
+) -> None:
     """One wake -> boundary-aligned fetch/render -> retained state -> sleep."""
     epd = EPD7in5V2()
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
@@ -301,7 +316,7 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
     print("power: request boundary reached (%+d s late); starting network requests" % request_late_s)
     wdt.feed()
 
-    results = [None] * len(cfg["stops"])
+    results = [None] * len(cfg["stops"])  # type: list[list[dict[str, str]] | None]
     if connected:
         # A deep-sleep wake is itself the next retry one minute later. Do one
         # adapter attempt per source here instead of spending up to three
@@ -312,8 +327,9 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
 
     sections = []
     for i, stop in enumerate(cfg["stops"]):
-        if results[i] is not None:
-            sections.append(display.stop_section(stop["name"], results[i], stale=False))
+        result = results[i]
+        if result is not None:
+            sections.append(display.stop_section(stop["name"], result, stale=False))
         else:
             old = previous_sections[i] if i < len(previous_sections) else None
             sections.append(_stale_section(stop, old))
@@ -323,7 +339,7 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
                            and weather_cfg.get("latitude") is not None
                            and weather_cfg.get("longitude") is not None)
     weather_error = False
-    if weather_enabled and connected:
+    if weather_enabled and connected and isinstance(weather_cfg, dict):
         weather_interval_s = weather_cfg.get("pull_interval_min", 30) * 60
         weather_bucket = int(time.time() // weather_interval_s)
         if last_weather is None or weather_bucket != last_weather_bucket:
@@ -346,7 +362,7 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
                 age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
                 weather_error = not weather.keep_last_good(
                     last_weather, _local_today_iso(), age_s, max_age_s)
-    elif weather_enabled:
+    elif weather_enabled and isinstance(weather_cfg, dict):
         max_age_s = weather_cfg.get("max_age_min", 180) * 60
         age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
         weather_error = not weather.keep_last_good(last_weather, _local_today_iso(), age_s, max_age_s)
@@ -363,6 +379,7 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
 
     date_str, time_str = _local_now_strings()
     footer = display.footer_lines(date_str, time_str)
+    status = None  # type: Any
     if not connected:
         status = display.WIFI_ERROR
     elif weather_error:
@@ -400,7 +417,9 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
     machine.deepsleep(delay_s * 1000)
 
 
-async def display_loop(cfg, wifi_cfg=None):
+async def display_loop(
+    cfg: "dict[str, Any]", wifi_cfg: "dict[str, Any] | None" = None,
+) -> None:
     """Long-lived task. Ticks once per render interval, each tick
     re-rendering from cached departures + the current clock and pushing a
     panel refresh only when the rendered text actually changed (e-paper
@@ -425,7 +444,7 @@ async def display_loop(cfg, wifi_cfg=None):
       - full_refresh_interval_min how often a push is a full (flashing)
                                   refresh vs a differential partial
 
-    Refresh MODE (full vs. partial) -- see CLAUDE.md "Screen refresh
+    Refresh MODE (full vs. partial) -- see AGENTS.md "Screen refresh
     strategy": most pushes use the near-instant, non-flashing DIFFERENTIAL
     partial mode, and a full (flashing) refresh is used at least every
     full_refresh_interval_s to clear residue. Partial refreshes need the
@@ -460,7 +479,7 @@ async def display_loop(cfg, wifi_cfg=None):
     data_pull_interval_s = cfg.get("data_pull_interval_min", 1) * 60
     render_interval_s = cfg.get("render_interval_min", 1) * 60
     full_refresh_interval_s = cfg.get("full_refresh_interval_min", 30) * 60
-    last_good = [[] for _ in cfg["stops"]]     # each stop's last-known departures
+    last_good = [[] for _ in cfg["stops"]]  # type: list[list[dict[str, str]]]
     stale_flags = [False] * len(cfg["stops"])  # per-stop: is this stop showing OLD data (last fetch failed)?
     have_fetched = False  # has ANY pull attempt completed yet? (distinct from "the data is empty")
     consecutive_all_failed = 0  # pulls in a row where EVERY stop errored -> Wi-Fi reconnect trigger
@@ -475,7 +494,7 @@ async def display_loop(cfg, wifi_cfg=None):
     ntp_resync_interval_s = 24 * 3600
     last_ntp_bucket = None
 
-    # Optional today-weather footer (see CLAUDE.md "Screen design"). Absent
+    # Optional today-weather footer (see AGENTS.md "Screen design"). Absent
     # or disabled -> the footer draws the clock only, exactly as before.
     # Pulled on its own slow cadence (weather changes slowly; be gentle on
     # the keyless Open-Meteo quota), independent of the departures pull.
@@ -576,7 +595,7 @@ async def display_loop(cfg, wifi_cfg=None):
         # normal (up to 30 min) bucket; there's no urgency, and a next-bucket
         # refetch will refresh it. Uses openmeteo.fetch_today's default
         # retries/timeout (see WDT_TIMEOUT_MS for the worst-case-time math).
-        if weather_enabled:
+        if weather_enabled and isinstance(weather_cfg, dict):
             weather_bucket = int(time.time() // weather_pull_interval_s)
             if weather_bucket != last_weather_bucket or weather_error:
                 fetched = None
@@ -602,7 +621,7 @@ async def display_loop(cfg, wifi_cfg=None):
                     if weather.keep_last_good(last_weather, _local_today_iso(), age_s, weather_max_age_s):
                         weather_error = False
                         print("weather: fetch failed -- keeping last-good (%s, %d min old)"
-                              % (weather.summary_text(last_weather), age_s // 60))
+                              % (weather.summary_text(last_weather), int(age_s or 0) // 60))
                     else:
                         weather_error = True
                         print("weather: no fresh valid reading for today -- showing error")
@@ -668,7 +687,7 @@ async def display_loop(cfg, wifi_cfg=None):
         await _sleep_until_next_tick(wdt, render_interval_s)
 
 
-async def main():
+async def main() -> None:
     boot_ticks = time.ticks_ms()
     cfg = settings.load()
     power_cfg = cfg.get("power", {})
@@ -734,6 +753,6 @@ except KeyboardInterrupt:
     raise
 except Exception as e:
     print("main: fatal error, idling for recovery (Ctrl-C for REPL):")
-    sys.print_exception(e)
+    sys.print_exception(e)  # type: ignore[attr-defined]
     while True:
         time.sleep(1)

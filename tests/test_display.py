@@ -2,7 +2,7 @@
 physical framebuf.FrameBuffer main.py would pass in (display.py only
 calls fb.fill()/fill_rect()/pixel() on it); conftest.py separately fakes
 the `framebuf` module itself, since display.py's scaled built-in font
-needs one for its own internal scratch buffer (CLAUDE.md "Testability
+needs one for its own internal scratch buffer (AGENTS.md "Testability
 rule")."""
 import departures
 import display

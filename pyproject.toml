@@ -1,0 +1,19 @@
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+exclude = ["src[\\\\/]lib[\\\\/]"]
+mypy_path = ["typings"]
+disallow_untyped_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# `if False: from typing ...` keeps typing imports off the ESP32 while
+# still letting mypy resolve quoted annotations.
+warn_unreachable = false
+strict_equality = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["lib.microdot"]
+follow_imports = "skip"
