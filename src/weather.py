@@ -147,7 +147,9 @@ def parse_weather(
 ) -> "dict[str, Any] | None":
     """raw_json: Open-Meteo response with `daily` (temps) and `hourly`
     (weather_code, precipitation_probability) blocks requested for a
-    single day (forecast_days=1). Returns a small dict --
+    single day (forecast_days=1). The adapter verifies these top-level
+    blocks are dictionaries before a live payload reaches this parser.
+    Returns a small dict --
     {condition, tmax, tmin, precip} -- or None if the payload is unusable
     (so the caller keeps last-good / draws no weather). Temps are rounded
     to whole degrees (a glance display; the decimal is noise). condition

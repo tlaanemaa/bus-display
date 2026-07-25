@@ -46,9 +46,10 @@ def split_hero_display(display: str) -> "tuple[str, str | None]":
 
 def parse_departures(raw_json: "dict[str, Any] | None") -> "list[dict[str, str]]":
     """raw_json: the dict returned by sl.fetch_departures() (or an
-    equivalent fixture in tests) -- {"departures": [...]}. Returns a list
-    of plain dicts sorted by `expected` time, or [] if raw_json is falsy
-    or has no departures.
+    equivalent fixture in tests) -- {"departures": [...]}. The adapter
+    verifies that the top-level departures value is a list before a live
+    payload reaches this pure parser. Returns a list of plain dicts sorted by
+    `expected` time, or [] if raw_json is falsy or has no departures.
 
     Sorted by `expected`, NOT `scheduled` -- a delayed bus's `scheduled`
     time can be earlier than an on-time bus's, which used to put it first

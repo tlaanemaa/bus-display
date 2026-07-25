@@ -62,14 +62,10 @@ WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_l
                              # for is now moot (fetches are plain HTTP, see AGENTS.md "RAM-vs-HTTPS conflict
                              # (RESOLVED)"), so this should rarely fire, but a stuck socket read or driver
                              # busy-wait could still hang an iteration. 150s gives headroom over the worst
-                             # legitimate case with 2 configured stops: one fetch's worst case is
-                             # retries*timeout_s + (retries-1)*RETRY_DELAY_S = 3*10 + 2*3 = 36s (sl.py /
-                             # openmeteo.py share this shape), so 2 stops + weather sequentially worst-cases
-                             # at ~108s. Note weather now retries EVERY tick while erroring (see
-                             # display_loop's weather_error handling), not just its own slow bucket, so that
-                             # 36s is a common addition during an outage, not a rare coincidence -- still
-                             # well inside the 150s budget. If settings.json ever lists more than ~3 stops,
-                             # this may need raising.
+                             # legitimate case with 2 configured stops: each SL/Open-Meteo adapter makes
+                             # one 10s-bounded request, so two stops plus weather take at most ~30s. Weather
+                             # may retry on each render tick while its error is visible, but still only once
+                             # per tick. If settings.json ever lists many more stops, this may need raising.
 
 _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
                           # interval longer than the WDT window can't trip a spurious reboot during a normal wait
@@ -85,7 +81,7 @@ _WIFI_RECONNECT_AFTER_FAILS = 3
 
 
 def _fetch_all_stops(
-    cfg: "Settings", retries: int = 3, wdt: "Any | None" = None,
+    cfg: "Settings", wdt: "Any | None" = None,
 ) -> "list[list[dict[str, str]] | None]":
     """Fetch every configured stop independently, in the order given in
     settings.json -- no primary/fallback/suitability logic anymore, just
@@ -101,7 +97,7 @@ def _fetch_all_stops(
         try:
             raw = sl.fetch_departures(
                 stop["site_id"], forecast=cfg["forecast_min"],
-                direction=cfg["direction_code"], retries=retries)
+                direction=cfg["direction_code"])
             deps = departures.parse_departures(raw)
             results.append(deps[:cfg["departures_per_stop"]])
         except Exception as e:
@@ -340,12 +336,10 @@ async def deep_sleep_cycle(
 
     results = [None] * len(cfg["stops"])  # type: list[list[dict[str, str]] | None]
     if connected:
-        # A deep-sleep wake is itself the next retry one minute later. Do one
-        # adapter attempt per source here instead of spending up to three
-        # long socket timeouts in one wake. This keeps departures progressing
-        # even if another source (notably Open-Meteo) has a slow timeout, while
-        # the continuously-awake mode retains its original 3-attempt policy.
-        results = _fetch_all_stops(cfg, retries=1, wdt=wdt)
+        # A deep-sleep wake is itself the next retry one minute later. Every
+        # adapter call makes one bounded request, leaving time for every source
+        # even if another source (notably Open-Meteo) has a slow timeout.
+        results = _fetch_all_stops(cfg, wdt=wdt)
 
     weather_cfg = cfg["weather"]
     weather_attempted = False
@@ -363,8 +357,7 @@ async def deep_sleep_cycle(
         try:
             wdt.feed()
             weather_result = weather.parse_weather(openmeteo.fetch_today(
-                weather_cfg["latitude"], weather_cfg["longitude"],
-                retries=1))
+                weather_cfg["latitude"], weather_cfg["longitude"]))
             wdt.feed()
             if weather_result is None:
                 print("weather: unusable payload")
@@ -440,8 +433,8 @@ async def display_loop(
     loop sleeps onto the next multiple of the render interval (see
     _seconds_to_next_tick), so a 1-min interval wakes at the top of each
     minute (HH:MM:00, within a sub-second) and the footer clock flips right
-    as the real minute does. If a tick's work runs long (worst case a fetch
-    exhausting all retries, ~90s), that tick simply lands on a later boundary
+    as the real minute does. If a tick's work runs long (one 10s-bounded
+    request per source), that tick simply lands on a later boundary
     and the next tick re-aligns -- it never drifts into N-min-from-last-wake.
 
     Three intervals, all in cfg IN MINUTES (see settings.example.json;
@@ -601,8 +594,8 @@ async def display_loop(
         # eagerly to clear it fast. While we're happily showing a valid
         # last-good reading, weather_error is False, so we just wait out the
         # normal (up to 30 min) bucket; there's no urgency, and a next-bucket
-        # refetch will refresh it. Uses openmeteo.fetch_today's default
-        # retries/timeout (see WDT_TIMEOUT_MS for the worst-case-time math).
+        # fetch will refresh it. openmeteo.fetch_today makes one bounded
+        # request (see WDT_TIMEOUT_MS for the worst-case-time math).
         if weather_enabled and isinstance(weather_cfg, dict):
             weather_bucket = int(time.time() // weather_pull_interval_s)
             if weather_bucket != last_weather_bucket or weather_error:

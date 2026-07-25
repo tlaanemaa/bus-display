@@ -5,7 +5,6 @@ lives in departures.py so it can be tested on host without a `requests`
 import (see AGENTS.md "Testability rule").
 """
 import gc
-import time
 import requests
 
 if False:
@@ -20,50 +19,33 @@ if False:
 # nothing to protect by encrypting it.
 BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 
-# Same retry/timeout shape as openmeteo.py -- kept in sync deliberately (see
-# its module docstring). timeout_s=10 is deliberately aggressive: a hung
-# request past 10s is treated as dead and retried rather than waited out.
-# RETRY_DELAY_S=3 (not longer) keeps 2 stops x 3 retries within main.py's
-# per-tick WDT budget -- see main.py's WDT_TIMEOUT_MS comment for the math.
-RETRY_DELAY_S = 3
-
-
 def fetch_departures(
     site_id: "str | int",
     transport: str = "BUS",
     forecast: int = 60,
     direction: "int | None" = None,
-    retries: int = 3,
     timeout_s: int = 10,
 ) -> "dict[str, Any]":
-    """timeout_s bounds each attempt so a stuck request (observed
-    intermittently right after a fresh Wi-Fi connect -- see AGENTS.md
-    "Departures logic & stops") usually fails like any other network error
-    instead of hanging, letting the retry/stale-data fallback take over.
-    NOT a complete guarantee, though -- confirmed some hangs happen inside
-    blocking socket work this timeout doesn't cover; main.py's hardware
-    watchdog is the actual backstop against those.
+    """Fetch one validated SL payload.
 
-    direction: SL's direction_code (1 or 2) to filter server-side, keeping
+    timeout_s bounds the request; main.py keeps a stale per-stop result on a
+    failure and the next wake/tick makes the next attempt. direction is SL's
+    direction_code (1 or 2) to filter server-side, keeping
     the response small (see AGENTS.md "SL Transport API" -- keep the JSON
     small on-device). None means both directions.
     """
     url = "%s?transport=%s&forecast=%d" % (BASE_URL % site_id, transport, forecast)
     if direction is not None:
         url += "&direction=%d" % direction
-    last_err = None  # type: Exception | None
-    for attempt in range(retries):
-        gc.collect()
-        try:
-            resp = requests.get(url, timeout=timeout_s)
-            try:
-                return resp.json()
-            finally:
-                resp.close()
-        except Exception as e:
-            last_err = e
-            print("sl: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
-            if attempt < retries - 1:
-                time.sleep(RETRY_DELAY_S)
-    assert last_err is not None
-    raise last_err
+    gc.collect()
+    response = requests.get(url, timeout=timeout_s)
+    try:
+        status = getattr(response, "status_code", 200)
+        if status < 200 or status >= 300:
+            raise OSError("HTTP %d" % status)
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("departures"), list):
+            raise ValueError("response missing valid departures list")
+        return payload
+    finally:
+        response.close()
