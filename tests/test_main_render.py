@@ -44,18 +44,41 @@ def _load_main_without_boot(monkeypatch):
 
 
 class _EPD:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, partial_fail=None, events=None):
         self.fail = fail
+        self.partial_fail = partial_fail
+        self.events = events
+
+    def _record(self, event):
+        if self.events is not None:
+            self.events.append(event)
 
     def init(self):
-        pass
+        self._record("init")
 
     def display(self, _buf):
+        self._record("display")
         if self.fail:
             raise OSError("panel write failed")
 
+    def init_part(self):
+        self._record("init_part")
+
+    def partial_begin(self):
+        self._record("partial_begin")
+
+    def partial_old(self, _buf):
+        self._record("partial_old")
+        if self.partial_fail == "old":
+            raise OSError("partial old failed")
+
+    def partial_new(self, _buf):
+        self._record("partial_new")
+        if self.partial_fail == "new":
+            raise OSError("partial new failed")
+
     def sleep(self):
-        pass
+        self._record("sleep")
 
 
 def test_successful_refresh_logs_only_the_new_frame(monkeypatch):
@@ -86,3 +109,44 @@ def test_failed_refresh_does_not_log_a_success_summary(monkeypatch):
         main._draw_and_refresh(_EPD(fail=True), object(), bytearray(), frame, None, full=True)
 
     assert printed == []
+
+
+def test_successful_partial_sends_old_then_new_and_logs_only_new(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    events = []
+    new_frame = ([{"name": "new"}], ["footer"], {"kind": "none"})
+    old_frame = ([{"name": "old"}], ["footer"], {"kind": "none"})
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, *frame: events.append("draw:" + frame[0][0]["name"]))
+    monkeypatch.setattr(main.display, "frame_summary", lambda frame: "summary:" + frame["sections"][0]["name"])
+    monkeypatch.setattr(builtins, "print", lambda text: events.append("print:" + text))
+
+    main._draw_and_refresh(_EPD(events=events), object(), bytearray(), new_frame, old_frame, full=False)
+
+    assert events == [
+        "init_part", "partial_begin", "draw:old", "partial_old",
+        "draw:new", "partial_new", "sleep", "print:summary:new",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("partial_fail", "expected_events"),
+    [
+        ("old", ["init_part", "partial_begin", "draw:old", "partial_old", "sleep"]),
+        ("new", ["init_part", "partial_begin", "draw:old", "partial_old", "draw:new", "partial_new", "sleep"]),
+    ],
+)
+def test_failed_partial_plane_never_logs_a_success_summary(monkeypatch, partial_fail, expected_events):
+    main = _load_main_without_boot(monkeypatch)
+    events = []
+    new_frame = ([{"name": "new"}], ["footer"], {"kind": "none"})
+    old_frame = ([{"name": "old"}], ["footer"], {"kind": "none"})
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, *frame: events.append("draw:" + frame[0][0]["name"]))
+    monkeypatch.setattr(main.display, "frame_summary", lambda _frame: "summary:new")
+    monkeypatch.setattr(builtins, "print", lambda text: events.append("print:" + text))
+
+    with pytest.raises(OSError, match="partial %s failed" % partial_fail):
+        main._draw_and_refresh(
+            _EPD(partial_fail=partial_fail, events=events), object(), bytearray(),
+            new_frame, old_frame, full=False)
+
+    assert events == expected_events

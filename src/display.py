@@ -464,8 +464,8 @@ def draw_weather_glyph(
 
 def stop_section(
     stop_key: str,
-    name: "Any",
-    deps: "list[dict[str, str]] | None" = None,
+    name: str,
+    deps: "list[dict[str, str]]",
     stale: bool = False,
 ) -> "DisplaySection":
     """Pure: content for one stop's section (no drawing) -- the hero
@@ -483,12 +483,6 @@ def stop_section(
     Not framebuffer-pure: it measures with the real fonts (opening them
     from flash) so truncation matches the ink. That's fine on host too --
     the .fnt files are plain data both places."""
-    # TEMPORARY Task 4 compatibility: legacy main.py passes (name, deps).
-    # Remove this branch once its cycle builders pass the explicit stop key.
-    if deps is None:
-        deps = name
-        name = stop_key
-
     import departures
     if not deps:
         return {"stop_key": stop_key, "name": name, "hero_main": None, "hero_unit": None,

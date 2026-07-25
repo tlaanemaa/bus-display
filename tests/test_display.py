@@ -1,6 +1,7 @@
 """Host-side tests for display.py with a tiny physical-buffer stand-in."""
 import departures
 import display
+import pytest
 
 
 class FakeFB:
@@ -86,6 +87,11 @@ def test_stop_section_carries_stale_flag():
 def test_stop_section_preserves_the_supplied_stable_key():
     section = display.stop_section("9192:2", "Renamed stop", [])
     assert section["stop_key"] == "9192:2"
+
+
+def test_stop_section_requires_a_stable_key_and_name():
+    with pytest.raises(TypeError):
+        display.stop_section("Renamed stop", [])
 
 
 def test_frame_is_json_native_and_identifies_stops():
