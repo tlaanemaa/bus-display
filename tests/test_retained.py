@@ -73,6 +73,24 @@ def test_oversize_state_is_rejected():
         retained.encode(oversized)
 
 
+def test_oversize_raw_is_rejected_before_checksum_or_json(monkeypatch):
+    checksum_calls = []
+
+    def checksum(_body):
+        checksum_calls.append(True)
+        return 0
+
+    def loads(_body):
+        raise AssertionError("oversized retained bytes reached JSON parsing")
+
+    monkeypatch.setattr(retained, "_checksum", checksum)
+    monkeypatch.setattr(retained.json, "loads", loads)
+    raw = retained.MAGIC + b"00000000:" + b" " * retained.MAX_BYTES
+
+    assert retained.decode(raw, "a1b2c3d4", ["9192:2"]) is None
+    assert checksum_calls == []
+
+
 def test_json_canonicalizes_tuples_without_invalidating_state():
     retained_state = state()
     retained_state["frame"]["sections"][0]["rows"] = [

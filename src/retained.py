@@ -168,7 +168,7 @@ def decode(
     expected_stop_keys: "list[str]",
 ) -> "RetainedState | None":
     try:
-        if not raw or not raw.startswith(MAGIC):
+        if not raw or len(raw) > MAX_BYTES or not raw.startswith(MAGIC):
             return None
         split = len(MAGIC) + 8
         if len(raw) <= split or raw[split:split + 1] != b":":
