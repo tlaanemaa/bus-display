@@ -1,11 +1,11 @@
 """Layout/rendering for the home (departures) screen. Draws through the
 90-degree portrait transform and stays inside the calibrated safe
-rectangle -- see AGENTS.md "Physical mounting & drawable area". Never
+rectangle -- see AGENTS.md "Hardware contract". Never
 draws a border/outline around the drawable area -- that's an explicit
 anti-decision recorded there; the margins below are silent layout
 bounds, not a rendered frame.
 
-Design (see AGENTS.md "Screen design"): a kitchen-counter, glance-from-
+Design (see AGENTS.md "Display design"): a kitchen-counter, glance-from-
 across-the-room display, not a reading surface. Top-aligned, filling the
 drawable area. Each stop gets a section: a small letter-spaced label, its
 next departure's countdown drawn huge (the "hero" -- the thing your eye
@@ -142,7 +142,7 @@ def _to_physical_rect(
     lx0: int, ly0: int, lw: int, lh: int,
 ) -> "tuple[int, int, int, int]":
     """physical.fill_rect(px0, py0, pw, ph) for a logical rect (lx0, ly0,
-    lw, lh) -- see AGENTS.md "Physical mounting & drawable area" for the
+    lw, lh) -- see AGENTS.md "Hardware contract" for the
     derivation. Don't re-derive; use this."""
     return PHYS_W - ly0 - lh, lx0, lh, lw
 
@@ -610,11 +610,11 @@ def _draw_footer_status_line(
 def _draw_footer_error_line(
     fb: "Any", message: str, datetime_str: str, ly: int,
 ) -> None:
-    """Same one-line footer band as _draw_footer_status_line, but for when
-    the weather fetch itself failed: showing the last-good reading next to
-    a live clock would look current when it isn't, so this replaces the
-    whole weather cluster with a plain text message instead (same reasoning
-    as the per-stop STALE badge -- AGENTS.md "Departures logic & stops")."""
+    """Draw a one-line status-left/date-time-right footer band.
+
+    The caller uses it for priority Wi-Fi status or for weather only when no
+    usable reading remains; retained stale departures stay in their sections.
+    """
     row_f = _fonts()["row"]
     wi = _footer_line_height()
     ty = ly + (wi - row_f.height) // 2
@@ -694,11 +694,9 @@ def draw_home(
 
     content_bottom = y  # logical y just past the last section, before the footer
 
-    # Footer band, bottom-anchored. With weather it's a SINGLE status line
-    # (weather left, date/time right -- see _draw_footer_status_line); the
-    # separation from the departures above is just the whitespace freed by not
-    # stacking a weather row over the clock. Without weather it falls back to
-    # the original centered date/time line(s).
+    # Footer band, bottom-anchored. Weather and explicit status use one line
+    # (left) plus date/time (right). Without weather, date/time is centered
+    # and may use one or two lines.
     if status["kind"] == "wifi_error":
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h

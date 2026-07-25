@@ -1,6 +1,6 @@
 """Pure logic: parse/filter/format SL departures JSON. No hardware or
 network imports -- runs under host CPython with pytest (see AGENTS.md
-"Testability rule"). sl.py does the fetching; this module never touches
+"Source layout and implementation rules"). sl.py does the fetching; this module never touches
 the network.
 """
 
@@ -33,7 +33,7 @@ def split_hero_display(display: str) -> "tuple[str, str | None]":
     """Split an SL `display` string into (main, unit) for the hero
     treatment: the big countdown number rendered huge, with any trailing
     unit word ("min") rendered smaller alongside it (see AGENTS.md
-    "Screen design"). Only splits on a trailing alphabetic word -- "5
+    "Display design"). Only splits on a trailing alphabetic word -- "5
     min" -> ("5", "min"), "Nu" -> ("Nu", None) (nothing to demote), "12:34"
     -> ("12:34", None) (a clock time has no unit)."""
     if " " in display:

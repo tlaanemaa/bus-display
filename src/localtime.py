@@ -1,7 +1,7 @@
 """Pure UTC -> Stockholm local time conversion (CET/CEST, EU DST rule) and
 formatting. No time/machine imports -- takes a UTC calendar tuple in,
 returns a local one out, so it runs under host CPython with pytest (see
-AGENTS.md "Testability rule"). The device only has UTC from NTP; SL's own
+AGENTS.md "Source layout and implementation rules"). The device only has UTC from NTP; SL's own
 `display` field sidesteps this for departure countdowns, but showing the
 actual current date/time in the footer needs real local time, hence this
 module.

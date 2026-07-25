@@ -6,8 +6,10 @@ on an ESP32 Universal e-Paper Driver Board, running MicroPython.
 The firmware has one synchronous deep-sleep wake cycle. It validates local
 configuration, reserves its one framebuffer before any radio or RTC work,
 restores compatible semantic screen state, connects, waits for exactly `:00`,
-fetches each source once, updates the panel only when the rendered result
-changes, safely commits retained state, and sleeps until the next minute.
+fetches SL once for each configured stop and weather at most once when due,
+updates the panel only when the rendered result changes, safely commits
+retained state, and sleeps until the next minute. There are no immediate
+request retries.
 
 The panel shows clear Wi-Fi status when it cannot connect; the next wake tries
 again. Configuration is USB-only—there is no network provisioning mode.
@@ -56,20 +58,26 @@ Run the checks and deterministic USB deploy:
 deploy.bat COM3
 ```
 
-`deploy.bat` precompiles the explicit firmware module set, removes retired
-device artifacts, and uploads `main.py`, bytecode, settings, Wi-Fi config,
-and streamed font files before resetting the board. Close any serial console
-first; only one process can hold the USB port.
+`deploy.bat` precompiles the explicit firmware module set, removes only known
+retired device artifacts, and uploads `main.py`, bytecode, settings, Wi-Fi
+config, and streamed font files before resetting the board. Settings and Wi-Fi
+config are uploaded only when their local files exist; otherwise the existing
+device copies are preserved. Close any serial console first; only one process
+can hold the USB port.
 
 ## Display and refresh behavior
 
 The large, left-aligned Bitter countdown is the primary information for each
 configured stop. Smaller line/destination and following-departure rows give
 context. A stop with a failed request is marked `STALE` without obscuring the
-other stop. The footer puts weather on the left and local date/time on the
-right. A full refresh is used for the first compatible-state failure and at
-the configured ghost-clearing interval; normal changed minute updates are
-true differential partial refreshes using one semantic retained frame.
+other stop. With weather enabled, the one-line footer puts weather or its
+status on the left and local date/time on the right. With weather disabled,
+the centered clock may use two lines. `Wi-Fi unavailable` takes priority even
+when stale retained departures remain visible; `Weather error` is reserved for
+the absence of any usable weather reading. A full refresh is used for the
+first compatible-state failure and at the configured ghost-clearing interval;
+normal changed minute updates are true differential partial refreshes using one
+semantic retained frame.
 
 See [AGENTS.md](AGENTS.md) for the verified hardware contract, retained-state
 compatibility rules, screen geometry, and maintenance guidance.

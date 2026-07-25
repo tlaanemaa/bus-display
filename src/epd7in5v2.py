@@ -4,12 +4,13 @@ Line-for-line port of Waveshare's epd7in5_V2.py reference driver
 (RaspberryPi_JetsonNano/python/lib/waveshare_epd/, fetched 2026-07-04):
 same command bytes and order for init/clear/display/sleep, same two-plane
 (0x10 + 0x13) write on every refresh, same 0x71-before-each-busy-read
-polling. See AGENTS.md "Hardware" before changing any command byte here.
+polling. See AGENTS.md "Hardware contract" before changing any command byte here.
 
 init_fast/4-gray from the reference driver are not ported -- add them
 only when the project actually needs them. Partial refresh IS ported, but
 as a differential update (init_part + partial_begin/partial_old/partial_new,
-2026-07-10, see AGENTS.md "Screen refresh strategy") rather than Waveshare's
+2026-07-10, see AGENTS.md "Retained state and panel transaction") rather than
+Waveshare's
 stock one-plane display_Partial() -- see the block comment above those
 methods for why.
 """
@@ -19,7 +20,7 @@ import time
 WIDTH = 800
 HEIGHT = 480
 BUF_SIZE = WIDTH * HEIGHT // 8  # 48000
-_CHUNK = 512  # never hold two BUF_SIZE-sized buffers at once -- see AGENTS.md RAM notes
+_CHUNK = 512  # never hold two BUF_SIZE-sized buffers at once -- see AGENTS.md Product operation
 
 
 class EPD7in5V2:
@@ -70,7 +71,7 @@ class EPD7in5V2:
         small reusable scratch buffer instead of allocating a second
         BUF_SIZE buffer. Two 48 KB buffers alive at once can MemoryError
         even with plenty of nominal free heap, because MicroPython's
-        allocator doesn't defragment -- see AGENTS.md."""
+        allocator doesn't defragment -- see AGENTS.md "Product operation"."""
         self._dc(1)
         self._cs(0)
         scratch = bytearray(_CHUNK)
@@ -208,7 +209,7 @@ class EPD7in5V2:
     # bytes are shifted out over SPI they live in the panel controller's RAM,
     # not ESP32 RAM, so overwriting the Python buffer between planes is safe.
     # This keeps the "never hold two BUF_SIZE buffers alive at once" rule
-    # (see AGENTS.md RAM notes) -- do NOT add a display_partial_diff(old, new)
+    # (see AGENTS.md "Product operation") -- do NOT add a display_partial_diff(old, new)
     # that takes two buffers.
     #
     # Enter partial mode with init_part() (once, right before this sequence),

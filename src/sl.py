@@ -1,8 +1,8 @@
 """Thin I/O wrapper: fetch departures JSON over plain HTTP from SL's
-Transport API (see AGENTS.md "SL Transport API" -- no API key needed; HTTP
-not HTTPS on purpose, see BASE_URL). All parsing/filtering/formatting logic
-lives in departures.py so it can be tested on host without a `requests`
-import (see AGENTS.md "Testability rule").
+Transport API (see AGENTS.md "Data rules" -- no API key needed; HTTP not HTTPS
+on purpose, see BASE_URL). All parsing/filtering/formatting logic lives in
+departures.py so it can be tested on host without a `requests` import (see
+AGENTS.md "Source layout and implementation rules").
 """
 import gc
 import requests
@@ -11,8 +11,9 @@ if False:
     from typing import Any
 
 # Plain HTTP is deliberate: this is public, keyless transit data and the
-# endpoint serves HTTP directly. It keeps this bounded adapter small on the
-# PSRAM-less device; do not add an HTTPS transport without an explicit need.
+# endpoint serves HTTP directly. It avoids an HTTPS TLS handshake's large
+# contiguous-memory demand on this no-PSRAM device; do not add HTTPS without
+# an explicit need.
 BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 
 def fetch_departures(
@@ -25,9 +26,9 @@ def fetch_departures(
     """Fetch one validated SL payload.
 
     timeout_s bounds the request; main.py keeps a stale per-stop result on a
-    failure and the next wake makes the next attempt. direction is SL's
+    failure and the next wake makes one new attempt for this stop. direction is SL's
     direction_code (1 or 2) to filter server-side, keeping
-    the response small (see AGENTS.md "SL Transport API" -- keep the JSON
+    the response small (see AGENTS.md "Data rules" -- keep the JSON
     small on-device). None means both directions.
     """
     url = "%s?transport=%s&forecast=%d" % (BASE_URL % site_id, transport, forecast)

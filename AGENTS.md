@@ -51,8 +51,10 @@ the same buffer for a differential old plane, then the new frame reuses it.
 
 Wakes occur every minute. `power.wake_advance_s` defaults to 3, waking early
 enough to prepare Wi-Fi, but requests are held until exactly `HH:MM:00`.
-`wake_advance_s: 0` retains a boundary wake. Each adapter gets one bounded
-request per wake; the next wake is the retry. NTP is synchronized on a
+`wake_advance_s: 0` retains a boundary wake. SL gets one bounded request for
+each configured stop per wake; weather gets at most one bounded request when
+its interval is due; neither has immediate retries. The next eligible wake is
+the retry. NTP is synchronized on a
 connected cold boot and then at most daily after the request boundary. Its
 failure does not advance the last-success marker. SL's server-provided
 departure strings remain authoritative even if the local footer clock drifts.
@@ -69,9 +71,13 @@ mode.
 RTC state uses retained format v2 and is accepted only when its format version,
 renderer revision, settings fingerprint, checksum, and ordered stop identities
 all match. `retained.RENDER_REVISION` must change whenever semantic rendering
-meaning changes. The settings fingerprint covers every setting that changes a
-rendered frame; an incompatibility deliberately forces exactly one full
-refresh, and the following changed wake can use differential refresh again.
+meaning changes. The settings fingerprint contains the ordered stop names and
+site IDs, `direction_code`, `departures_per_stop`, `full_refresh_interval_min`,
+and either no weather value or the enabled flag, latitude, longitude, pull
+interval, and maximum age from the weather block. `forecast_min` is deliberately
+not part of this token. An incompatibility
+deliberately forces exactly one full refresh, and the following changed wake
+can use differential refresh again.
 
 For a changed frame, `refresh_txn.apply` encodes the new semantic state,
 clears RTC state, refreshes the panel, then writes and readback-validates the
@@ -110,7 +116,8 @@ expressions; typing imports stay under `if False:` for MicroPython and code
 must also compile with `mpy-cross`.
 
 SL and Open-Meteo use plain HTTP because they provide public, keyless data and
-the devices do not need a credential-bearing transport for these requests.
+therefore do not need a credential-bearing transport; it also avoids an HTTPS
+TLS handshake's large contiguous-memory demand on this no-PSRAM board.
 Precompile every module except `main.py` on the host because on-device source
 compilation fragments the small heap and jeopardizes the early framebuffer
 reservation. This is a durable deployment and memory rule, not retry policy.
@@ -127,9 +134,11 @@ divider.
 The streamed Bitter font roles are fixed: hero (~87 px, weight 800), heading
 (~35 px, weight 700), and row/footer (~27 px, weight 500). Glyphs are read
 from flash one at a time; do not replace them with resident font modules.
-`CONTENT_MARGIN = 14` inside the crop-safe region. The footer is one compact
-status line: weather cluster left and date/time right. It shows explicit
-Wi-Fi or weather errors only when no usable state can be shown.
+`CONTENT_MARGIN = 14` inside the crop-safe region. When weather is enabled,
+the footer is one compact weather/status line: weather (or its error) left and
+date/time right. When weather is disabled, the clock is centered and may take
+two lines. `Wi-Fi unavailable` has priority and can accompany retained stale
+departures; `Weather error` appears only when no usable weather reading exists.
 
 ## Data rules
 
@@ -165,11 +174,12 @@ Use the virtual environment for checks:
 ```
 
 `deploy.bat [COM_PORT]` is the deterministic deploy path. It precompiles its
-explicit module list, verifies the USB connection, removes retired device
-artifacts, uploads `main.py`, bytecode, `/settings.json` when present,
-`/config.json` when present, and font files, then resets the board. Close any
-serial console first. `main.py` is intentionally source because MicroPython
-boots that filename; the other modules ship as `.mpy`.
+explicit module list, verifies the USB connection, removes only known retired
+device artifacts, uploads `main.py`, bytecode, local `/settings.json` and
+`/config.json` when present (preserving the device copies when absent), and
+font files, then resets the board. Close any serial console first. `main.py`
+is intentionally source because MicroPython boots that filename; the other
+modules ship as `.mpy`.
 
 Do not access the panel during host-only work. Hardware acceptance requires
 the owner to inspect the display after deployment, including serial/panel

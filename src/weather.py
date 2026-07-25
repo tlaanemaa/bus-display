@@ -1,7 +1,7 @@
 """Pure logic: turn an Open-Meteo forecast JSON into the small "today"
 summary the footer draws -- condition bucket, high/low, precipitation
 chance. No hardware or network imports, so it runs under host pytest (see
-AGENTS.md "Testability rule"); openmeteo.py does the fetching.
+AGENTS.md "Source layout and implementation rules"); openmeteo.py does the fetching.
 
 Why Open-Meteo and not SMHI (the obvious Swedish source): SMHI's point
 forecast returns the whole multi-day hourly series (100KB+), and parsing
@@ -249,7 +249,7 @@ def format_precip(weather: "dict[str, Any]") -> "str | None":
 
 def summary_text(weather: "dict[str, Any] | None") -> str:
     """One compact line for serial logging + render change-detection
-    (AGENTS.md "make the code corroborate the screen"). Not drawn."""
+    (AGENTS.md "Project"). Not drawn."""
     if not weather:
         return "weather: n/a"
     p = format_precip(weather)

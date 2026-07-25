@@ -203,7 +203,7 @@ def deep_sleep_cycle(
     fb: "Any",
     fb_buf: bytearray,
 ) -> int:
-    """Fetch once, choose a refresh, persist safely, and return sleep delay."""
+    """Fetch each SL stop once, weather at most once when due, then persist."""
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
     previous_frame = state["frame"] if state else None
     last_weather_time = state["weather_time"] if state else None
