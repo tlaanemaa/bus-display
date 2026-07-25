@@ -9,6 +9,10 @@
   "data_pull_interval_min": 1,
   "render_interval_min": 1,
   "full_refresh_interval_min": 60,
+  "power": {
+    "deep_sleep": true,
+    "wake_advance_s": 3
+  },
   "weather": {
     "enabled": true,
     "latitude": 59.33,

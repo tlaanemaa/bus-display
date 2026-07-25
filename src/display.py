@@ -527,6 +527,7 @@ def _draw_footer_error_line(fb, message, datetime_str, ly):
 
 
 WEATHER_ERROR = "error"  # sentinel for the `weather` param: fetch failed, show an explicit message
+WIFI_ERROR = "wifi_error"  # no network: make an unattended wall display explicitly honest
 
 
 def draw_home(fb, sections, footer, weather=None):
@@ -603,7 +604,11 @@ def draw_home(fb, sections, footer, weather=None):
     # separation from the departures above is just the whitespace freed by not
     # stacking a weather row over the clock. Without weather it falls back to
     # the original centered date/time line(s).
-    if weather == WEATHER_ERROR:
+    if weather == WIFI_ERROR:
+        band_h = _footer_line_height()
+        footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
+        _draw_footer_error_line(fb, "Wi-Fi unavailable", " ".join(footer), footer_top)
+    elif weather == WEATHER_ERROR:
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
         _draw_footer_error_line(fb, "Weather error", " ".join(footer), footer_top)
@@ -619,7 +624,9 @@ def draw_home(fb, sections, footer, weather=None):
             _text_centered(fb, row_f, line, fy)
             fy += row_f.height + GAP_ROW
 
-    if weather == WEATHER_ERROR:
+    if weather == WIFI_ERROR:
+        weather_summary = "wifi: unavailable"
+    elif weather == WEATHER_ERROR:
         weather_summary = "weather: error"
     else:
         import weather as wx

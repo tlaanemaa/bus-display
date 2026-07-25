@@ -19,7 +19,8 @@ A DIY bus departure display: a Waveshare 7.5" e-paper panel driven by an ESP32 (
 Install host tools:
 
 ```
-pip install esptool mpremote pytest mpy-cross
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt
 ```
 
 Flash MicroPython (download `ESP32_GENERIC-<version>.bin` from [micropython.org/download/ESP32_GENERIC](https://micropython.org/download/ESP32_GENERIC/)):

@@ -46,6 +46,8 @@ import display
 import localtime
 import openmeteo
 import weather
+import retained
+import wake_schedule
 from epd7in5v2 import EPD7in5V2
 
 # `server` (Microdot) is deliberately NOT imported here -- server.py builds
@@ -224,6 +226,160 @@ def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
         epd.partial_new(fb_buf)
     finally:
         _safe_sleep(epd)
+
+
+async def _wait_until_epoch(wdt, target_epoch):
+    """Keep the ESP32 awake but idle until the request boundary."""
+    while True:
+        remaining = int(target_epoch - time.time())
+        if remaining <= 0:
+            return
+        wdt.feed()
+        await asyncio.sleep(remaining if remaining < _WDT_FEED_CHUNK_S else _WDT_FEED_CHUNK_S)
+
+
+def _rtc_state_load():
+    raw = machine.RTC().memory()
+    state = retained.decode(raw)
+    if state is None:
+        reason = "empty" if not raw else "invalid/corrupt/incompatible"
+        print("retained: %s (%d bytes) -- next refresh must be full" % (reason, len(raw)))
+    else:
+        print("retained: restored %d bytes -- differential old frame available" % len(raw))
+    return state
+
+
+def _rtc_state_save(state):
+    """Write and read back before sleeping; never silently trust retention."""
+    raw = retained.encode(state)
+    rtc = machine.RTC()
+    rtc.memory(raw)
+    checked = retained.decode(rtc.memory())
+    if checked != state:
+        raise OSError("RTC retained-state readback mismatch")
+    print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
+
+
+def _stale_section(cfg_stop, previous):
+    if previous:
+        section = dict(previous)
+        section["stale"] = True
+        return section
+    return display.stop_section(cfg_stop["name"], [], stale=True)
+
+
+async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_ticks):
+    """One wake -> boundary-aligned fetch/render -> retained state -> sleep."""
+    epd = EPD7in5V2()
+    wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
+    gc.collect()
+    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
+    fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
+
+    previous_frame = state.get("frame") if state else None
+    previous_sections = previous_frame[0] if previous_frame else []
+    last_full_epoch = state.get("last_full") if state else None
+    last_weather = state.get("weather") if state else None
+    last_weather_time = state.get("weather_time") if state else None
+    last_weather_bucket = state.get("weather_bucket") if state else None
+    last_ntp_epoch = state.get("last_ntp") if state else None
+
+    lead_observed_ms = time.ticks_diff(time.ticks_ms(), boot_ticks)
+    print("power: preparation took %d ms; requests target epoch %d" % (lead_observed_ms, request_epoch))
+    await _wait_until_epoch(wdt, request_epoch)
+    request_late_s = int(time.time() - request_epoch)
+    print("power: request boundary reached (%+d s late); starting network requests" % request_late_s)
+    wdt.feed()
+
+    results = [None] * len(cfg["stops"])
+    if connected:
+        results = _fetch_all_stops(cfg)
+
+    sections = []
+    for i, stop in enumerate(cfg["stops"]):
+        if results[i] is not None:
+            sections.append(display.stop_section(stop["name"], results[i], stale=False))
+        else:
+            old = previous_sections[i] if i < len(previous_sections) else None
+            sections.append(_stale_section(stop, old))
+
+    weather_cfg = cfg.get("weather")
+    weather_enabled = bool(weather_cfg and weather_cfg.get("enabled", True)
+                           and weather_cfg.get("latitude") is not None
+                           and weather_cfg.get("longitude") is not None)
+    weather_error = False
+    if weather_enabled and connected:
+        weather_interval_s = weather_cfg.get("pull_interval_min", 30) * 60
+        weather_bucket = int(time.time() // weather_interval_s)
+        if last_weather is None or weather_bucket != last_weather_bucket:
+            fetched = None
+            try:
+                fetched = weather.parse_weather(openmeteo.fetch_today(
+                    weather_cfg["latitude"], weather_cfg["longitude"]))
+            except Exception as e:
+                print("weather: fetch failed:", e)
+            if fetched is not None:
+                last_weather = fetched
+                last_weather_time = time.time()
+                last_weather_bucket = weather_bucket
+                print("weather: " + weather.summary_text(fetched))
+            else:
+                max_age_s = weather_cfg.get("max_age_min", 180) * 60
+                age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
+                weather_error = not weather.keep_last_good(
+                    last_weather, _local_today_iso(), age_s, max_age_s)
+    elif weather_enabled:
+        max_age_s = weather_cfg.get("max_age_min", 180) * 60
+        age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
+        weather_error = not weather.keep_last_good(last_weather, _local_today_iso(), age_s, max_age_s)
+
+    # RTC survives deep sleep. Resync at most daily, after the boundary so
+    # ordinary wakes perform no network request before :00.
+    if connected and (last_ntp_epoch is None or time.time() - last_ntp_epoch >= 24 * 3600):
+        try:
+            ntptime.settime()
+            last_ntp_epoch = time.time()
+            print("power: NTP resync ok")
+        except Exception as e:
+            print("power: NTP resync failed:", e)
+
+    date_str, time_str = _local_now_strings()
+    footer = display.footer_lines(date_str, time_str)
+    if not connected:
+        status = display.WIFI_ERROR
+    elif weather_error:
+        status = display.WEATHER_ERROR
+    else:
+        status = last_weather
+    frame = [sections, footer, status]
+
+    full_interval_s = cfg.get("full_refresh_interval_min", 60) * 60
+    now_epoch = int(time.time())
+    full = (previous_frame is None or last_full_epoch is None
+            or now_epoch - last_full_epoch >= full_interval_s)
+    if frame != previous_frame:
+        print("power: content changed, %s refresh" % ("full" if full else "partial"))
+        _draw_and_refresh(epd, fb, fb_buf, frame, previous_frame, full)
+        if full:
+            last_full_epoch = now_epoch
+    else:
+        print("power: content unchanged -- no panel refresh")
+
+    next_state = {
+        "v": 1, "frame": frame, "last_full": last_full_epoch,
+        "weather": last_weather, "weather_time": last_weather_time,
+        "weather_bucket": last_weather_bucket, "last_ntp": last_ntp_epoch,
+    }
+    _rtc_state_save(next_state)
+
+    advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
+    delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)
+    print("power: deep sleep %d s; next wake %d s before minute boundary" % (delay_s, advance_s))
+    try:
+        network.WLAN(network.STA_IF).active(False)
+    except Exception:
+        pass
+    machine.deepsleep(delay_s * 1000)
 
 
 async def display_loop(cfg, wifi_cfg=None):
@@ -495,13 +651,20 @@ async def display_loop(cfg, wifi_cfg=None):
 
 
 async def main():
+    boot_ticks = time.ticks_ms()
+    cfg = settings.load()
+    power_cfg = cfg.get("power", {})
+    deep_sleep = power_cfg.get("deep_sleep", False)
+    wake_advance_s = power_cfg.get("wake_advance_s", 3)
+    state = _rtc_state_load() if deep_sleep else None
+    request_epoch = wake_schedule.request_boundary(time.time(), 60)
     wifi_cfg = config.load().get("wifi")
 
     connected = False
     if wifi_cfg and wifi_cfg.get("ssid"):
         connected = wifi.connect_sta(wifi_cfg["ssid"], wifi_cfg.get("password", ""))
 
-    if connected:
+    if connected and not deep_sleep:
         try:
             ntptime.settime()
             print("main: NTP sync ok")
@@ -526,13 +689,25 @@ async def main():
         except Exception as e:
             print("main: font warm failed (non-fatal):", e)
 
-        await display_loop(settings.load(), wifi_cfg)
+        await display_loop(cfg, wifi_cfg)
+    elif deep_sleep:
+        # A cold boot has no trustworthy retained wall clock. Sync once before
+        # choosing its first request boundary; normal deep-sleep wakes retain
+        # the RTC and do their daily NTP request only after the :00 boundary.
+        if connected and state is None:
+            try:
+                ntptime.settime()
+                print("main: cold-boot NTP sync ok")
+            except Exception as e:
+                print("main: cold-boot NTP sync failed:", e)
+            request_epoch = wake_schedule.request_boundary(time.time(), 60)
+        print("main: deep-sleep mode; wake advance = %d s" % wake_advance_s)
+        await deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_ticks)
     else:
-        wifi.start_ap()
-        print("main: no/failed Wi-Fi config -- setup form at http://192.168.4.1")
-        print("main: starting admin server on port 80")
-        import server
-        await server.app.start_server(port=80)
+        # No captive portal: USB is the configuration path. Keep retrying on
+        # subsequent resets/deep-sleep wakes and never silently look current.
+        print("main: Wi-Fi unavailable; AP setup portal is disabled")
+        await display_loop(cfg, wifi_cfg)
 
 
 try:

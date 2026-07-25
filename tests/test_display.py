@@ -148,3 +148,11 @@ def test_draw_home_shows_weather_error_instead_of_stale_reading():
     fb = FakeFB(display.PHYS_W, display.PHYS_H)
     content_bottom, footer_top = display.draw_home(fb, sections, footer, display.WEATHER_ERROR)
     assert content_bottom <= footer_top
+
+
+def test_draw_home_shows_wifi_error_and_still_fits():
+    sections = [display.stop_section("MÃ¶lnvik", [], stale=True)]
+    footer = display.footer_lines("Fre 10 jul", "14:32")
+    fb = FakeFB(display.PHYS_W, display.PHYS_H)
+    content_bottom, footer_top = display.draw_home(fb, sections, footer, display.WIFI_ERROR)
+    assert content_bottom <= footer_top

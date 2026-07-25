@@ -1,0 +1,5 @@
+# Host development, deployment, and hardware bring-up tools.
+pytest
+esptool
+mpremote
+mpy-cross

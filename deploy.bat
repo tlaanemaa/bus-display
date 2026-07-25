@@ -34,11 +34,15 @@ if "%~1"=="" (
 
 set "SRCDIR=%~dp0src"
 
-rem mpremote is run as a Python module (same as your working test.bat:
-rem "python -m mpremote"). If "python" isn't your launcher, change this line
-rem -- e.g. "py -m mpremote" or a full path like
-rem "C:\Users\you\anaconda3\python.exe -m mpremote".
-set "MP=python -m mpremote"
+rem Use the repo-local environment so deploy is reproducible and does not
+rem depend on a global Python being on PATH. Set it up per README.md first.
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    echo ERROR: project virtual environment not found.
+    echo        Create it with the commands in README.md.
+    goto :fail
+)
+set "MP=%PY% -m mpremote"
 
 if not exist "%SRCDIR%\settings.json" (
     echo WARNING: %SRCDIR%\settings.json not found.
@@ -63,7 +67,7 @@ rem It's small; with everything else precompiled there's ample contiguous RAM.
 for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
     if /I not "%%~nxF"=="main.py" (
         echo   compile %%~nF.mpy
-        python -m mpy_cross "%%F"
+        "%PY%" -m mpy_cross "%%F"
         if errorlevel 1 (
             echo ERROR: mpy-cross failed for %%~nxF -- is mpy-cross installed?  pip install mpy-cross
             goto :fail
