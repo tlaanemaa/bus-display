@@ -86,7 +86,7 @@ _FB_HEIGHT = 480
 _WIFI_RECONNECT_AFTER_FAILS = 3
 
 
-def _fetch_all_stops(cfg):
+def _fetch_all_stops(cfg, retries=3, wdt=None):
     """Fetch every configured stop independently, in the order given in
     settings.json -- no primary/fallback/suitability logic anymore, just
     an ordered list of stops the owner cares about (see CLAUDE.md
@@ -96,13 +96,19 @@ def _fetch_all_stops(cfg):
     cached data)."""
     results = []
     for stop in cfg["stops"]:
+        if wdt is not None:
+            wdt.feed()
         try:
-            raw = sl.fetch_departures(stop["site_id"], forecast=cfg["forecast_min"], direction=cfg["direction_code"])
+            raw = sl.fetch_departures(
+                stop["site_id"], forecast=cfg["forecast_min"],
+                direction=cfg["direction_code"], retries=retries)
             deps = departures.parse_departures(raw)
             results.append(deps[:cfg["departures_per_stop"]])
         except Exception as e:
             print("fetch: stop %s failed: %s" % (stop["name"], e))
             results.append(None)
+        if wdt is not None:
+            wdt.feed()
     return results
 
 
@@ -254,8 +260,12 @@ def _rtc_state_save(state):
     raw = retained.encode(state)
     rtc = machine.RTC()
     rtc.memory(raw)
-    checked = retained.decode(rtc.memory())
-    if checked != state:
+    readback = rtc.memory()
+    # Compare the exact stored bytes, then independently validate decoding.
+    # Do not compare decoded JSON to the live Python object: display rows are
+    # tuples while JSON canonically restores arrays as lists, so semantically
+    # identical state would falsely fail an object-equality check.
+    if readback != raw or retained.decode(readback) is None:
         raise OSError("RTC retained-state readback mismatch")
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
 
@@ -293,7 +303,12 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
 
     results = [None] * len(cfg["stops"])
     if connected:
-        results = _fetch_all_stops(cfg)
+        # A deep-sleep wake is itself the next retry one minute later. Do one
+        # adapter attempt per source here instead of spending up to three
+        # long socket timeouts in one wake. This keeps departures progressing
+        # even if another source (notably Open-Meteo) has a slow timeout, while
+        # the continuously-awake mode retains its original 3-attempt policy.
+        results = _fetch_all_stops(cfg, retries=1, wdt=wdt)
 
     sections = []
     for i, stop in enumerate(cfg["stops"]):
@@ -314,8 +329,11 @@ async def deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_
         if last_weather is None or weather_bucket != last_weather_bucket:
             fetched = None
             try:
+                wdt.feed()
                 fetched = weather.parse_weather(openmeteo.fetch_today(
-                    weather_cfg["latitude"], weather_cfg["longitude"]))
+                    weather_cfg["latitude"], weather_cfg["longitude"],
+                    retries=1))
+                wdt.feed()
             except Exception as e:
                 print("weather: fetch failed:", e)
             if fetched is not None:

@@ -40,3 +40,11 @@ def test_oversize_state_is_rejected():
         pass
     else:
         raise AssertionError("oversize state was accepted")
+
+
+def test_json_canonicalizes_tuples_without_invalidating_state():
+    state = _state()
+    state["frame"][0][0]["rows"] = [("440", "Slussen", "12 min")]
+    decoded = retained.decode(retained.encode(state))
+    assert decoded is not None
+    assert decoded["frame"][0][0]["rows"] == [["440", "Slussen", "12 min"]]
