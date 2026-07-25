@@ -5,7 +5,7 @@ without importing ``typing`` or allocating type metadata on the ESP32.
 """
 
 if False:
-    from typing import Any, Callable, Literal, NotRequired, Protocol, TypedDict
+    from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
     class StopConfig(TypedDict):
         name: str
@@ -19,6 +19,7 @@ if False:
         max_age_min: int
 
     class PowerConfig(TypedDict):
+        deep_sleep: bool
         wake_advance_s: int
 
     class Settings(TypedDict):
@@ -26,6 +27,8 @@ if False:
         direction_code: int
         forecast_min: int
         departures_per_stop: int
+        data_pull_interval_min: int
+        render_interval_min: int
         full_refresh_interval_min: int
         power: PowerConfig
         weather: WeatherConfig | None
@@ -33,6 +36,9 @@ if False:
     class WifiConfig(TypedDict):
         ssid: str
         password: str
+
+    class ConfigRoot(TypedDict):
+        wifi: NotRequired[WifiConfig]
 
     class Departure(TypedDict):
         line: str

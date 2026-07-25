@@ -51,6 +51,7 @@ from epd7in5v2 import EPD7in5V2
 
 if False:
     from typing import Any
+    from models import Settings, StopConfig, WifiConfig
 
 # `server` (Microdot) is deliberately not imported: USB configuration
 # replaced the setup portal, and its top-level route construction costs RAM.
@@ -83,7 +84,7 @@ _WIFI_RECONNECT_AFTER_FAILS = 3
 
 
 def _fetch_all_stops(
-    cfg: "dict[str, Any]", retries: int = 3, wdt: "Any | None" = None,
+    cfg: "Settings", retries: int = 3, wdt: "Any | None" = None,
 ) -> "list[list[dict[str, str]] | None]":
     """Fetch every configured stop independently, in the order given in
     settings.json -- no primary/fallback/suitability logic anymore, just
@@ -277,7 +278,7 @@ def _rtc_state_save(state: "dict[str, Any]") -> None:
 
 
 def _stale_section(
-    cfg_stop: "dict[str, Any]", previous: "dict[str, Any] | None",
+    cfg_stop: "StopConfig", previous: "dict[str, Any] | None",
 ) -> "dict[str, Any]":
     if previous:
         section = dict(previous)
@@ -287,8 +288,8 @@ def _stale_section(
 
 
 async def deep_sleep_cycle(
-    cfg: "dict[str, Any]",
-    wifi_cfg: "dict[str, Any] | None",
+    cfg: "Settings",
+    wifi_cfg: "WifiConfig | None",
     connected: bool,
     state: "dict[str, Any] | None",
     request_epoch: int,
@@ -418,7 +419,7 @@ async def deep_sleep_cycle(
 
 
 async def display_loop(
-    cfg: "dict[str, Any]", wifi_cfg: "dict[str, Any] | None" = None,
+    cfg: "Settings", wifi_cfg: "WifiConfig | None" = None,
 ) -> None:
     """Long-lived task. Ticks once per render interval, each tick
     re-rendering from cached departures + the current clock and pushing a

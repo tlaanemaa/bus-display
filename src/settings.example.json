@@ -1,6 +1,5 @@
 {
   "stops": [
-    {"name": "Slussen (EXAMPLE - replace with your stop)", "site_id": 9192},
     {"name": "Slussen (EXAMPLE - replace with your stop)", "site_id": 9192}
   ],
   "direction_code": 2,
