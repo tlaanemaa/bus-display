@@ -80,11 +80,15 @@ for %%M in (%MODULES%) do (
 
 echo Deploying to %PORTDESC% ...
 
-rem --- retire files left by the old setup portal deployment -----------------
-rem Absence is normal, so cleanup is deliberately best-effort.
-%MP% %CONN% fs rm :server.mpy >nul 2>nul
-%MP% %CONN% fs rm :lib/microdot.mpy >nul 2>nul
-%MP% %CONN% fs rmdir :lib >nul 2>nul
+rem --- prove the device connection before required cleanup ------------------
+%MP% %CONN% exec "import os; os.ilistdir()"
+if errorlevel 1 goto :fail
+
+rem --- required retired-file cleanup ----------------------------------------
+rem An absent target is successful. Any connection, execution, or non-empty
+rem directory error must fail deployment instead of leaving stale firmware.
+%MP% %CONN% exec "import os; root=[entry[0] for entry in os.ilistdir('.')]; (os.remove('server.mpy') if 'server.mpy' in root else None); (os.remove('main.mpy') if 'main.mpy' in root else None); (os.remove('lib/microdot.mpy') if 'lib' in root and 'microdot.mpy' in [entry[0] for entry in os.ilistdir('lib')] else None); (os.rmdir('lib') if 'lib' in root else None)"
+if errorlevel 1 goto :fail
 
 rem --- top-level files: main.py (source), explicit bytecode, local config ---
 echo   cp main.py
