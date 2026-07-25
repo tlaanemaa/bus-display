@@ -81,6 +81,94 @@ class _EPD:
         self._record("sleep")
 
 
+class _RTC:
+    def __init__(self, raw=b""):
+        self.raw = raw
+
+    def memory(self, raw=None):
+        if raw is not None:
+            self.raw = raw
+        return self.raw
+
+
+def _cfg():
+    return {
+        "stops": [{"name": "Slussen", "site_id": 9192}],
+        "direction_code": 2,
+        "forecast_min": 180,
+        "departures_per_stop": 3,
+        "data_pull_interval_min": 1,
+        "render_interval_min": 1,
+        "full_refresh_interval_min": 60,
+        "power": {"deep_sleep": True, "wake_advance_s": 3},
+        "weather": None,
+    }
+
+
+def _retained_state(main, cfg):
+    return {
+        "v": main.retained.RETAINED_VERSION,
+        "render_rev": main.retained.RENDER_REVISION,
+        "settings": main.retained.settings_fingerprint(cfg),
+        "frame": {
+            "sections": [{
+                "stop_key": "9192:2",
+                "name": "Slussen",
+                "hero_main": None,
+                "hero_unit": None,
+                "badge_line": None,
+                "dest": "No departures",
+                "rows": [],
+                "stale": False,
+            }],
+            "footer": ["Lor 25 jul 14:32"],
+            "status": {"kind": "none"},
+        },
+        "last_full": 123,
+        "weather": None,
+        "weather_time": None,
+        "last_ntp": 120,
+    }
+
+
+def test_rtc_load_uses_settings_and_stop_identity(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    expected = _retained_state(main, cfg)
+    rtc = _RTC(main.retained.encode(expected))
+    monkeypatch.setattr(main.machine, "RTC", lambda: rtc)
+
+    assert main._rtc_state_load(cfg) == expected
+
+    changed = dict(cfg)
+    changed["direction_code"] = 1
+    assert main._rtc_state_load(changed) is None
+
+
+def test_rtc_load_rejects_old_v1_state_without_crashing(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    rtc = _RTC(main.retained.encode({"v": 1, "frame": []}))
+    monkeypatch.setattr(main.machine, "RTC", lambda: rtc)
+
+    assert main._rtc_state_load(_cfg()) is None
+
+
+def test_rtc_save_verifies_using_current_compatibility_context(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    expected = _retained_state(main, cfg)
+    rtc = _RTC()
+    monkeypatch.setattr(main.machine, "RTC", lambda: rtc)
+
+    main._rtc_state_save(expected, cfg)
+
+    assert main.retained.decode(
+        rtc.raw,
+        main.retained.settings_fingerprint(cfg),
+        ["9192:2"],
+    ) == expected
+
+
 def test_successful_refresh_logs_only_the_new_frame(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     draws = []
@@ -94,6 +182,31 @@ def test_successful_refresh_logs_only_the_new_frame(monkeypatch):
     main._draw_and_refresh(_EPD(), object(), bytearray(), new_frame, old_frame, full=True)
 
     assert draws == [new_frame]
+    assert printed == ["summary:new"]
+
+
+def test_successful_refresh_accepts_explicit_display_frame(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    draws = []
+    printed = []
+    frame = {
+        "sections": [{"name": "new"}],
+        "footer": ["footer"],
+        "status": {"kind": "none"},
+    }
+    monkeypatch.setattr(
+        main.display, "draw_home",
+        lambda _fb, supplied: draws.append(supplied),
+    )
+    monkeypatch.setattr(
+        main.display, "frame_summary",
+        lambda supplied: "summary:" + supplied["sections"][0]["name"],
+    )
+    monkeypatch.setattr(builtins, "print", lambda text: printed.append(text))
+
+    main._draw_and_refresh(_EPD(), object(), bytearray(), frame, None, full=True)
+
+    assert draws == [frame]
     assert printed == ["summary:new"]
 
 
@@ -121,6 +234,42 @@ def test_successful_partial_sends_old_then_new_and_logs_only_new(monkeypatch):
     monkeypatch.setattr(builtins, "print", lambda text: events.append("print:" + text))
 
     main._draw_and_refresh(_EPD(events=events), object(), bytearray(), new_frame, old_frame, full=False)
+
+    assert events == [
+        "init_part", "partial_begin", "draw:old", "partial_old",
+        "draw:new", "partial_new", "sleep", "print:summary:new",
+    ]
+
+
+def test_successful_partial_accepts_explicit_display_frames(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    events = []
+    new_frame = {
+        "sections": [{"name": "new"}],
+        "footer": ["footer"],
+        "status": {"kind": "none"},
+    }
+    old_frame = {
+        "sections": [{"name": "old"}],
+        "footer": ["footer"],
+        "status": {"kind": "none"},
+    }
+    monkeypatch.setattr(
+        main.display, "draw_home",
+        lambda _fb, supplied: events.append(
+            "draw:" + supplied["sections"][0]["name"],
+        ),
+    )
+    monkeypatch.setattr(
+        main.display, "frame_summary",
+        lambda supplied: "summary:" + supplied["sections"][0]["name"],
+    )
+    monkeypatch.setattr(builtins, "print", lambda text: events.append("print:" + text))
+
+    main._draw_and_refresh(
+        _EPD(events=events), object(), bytearray(),
+        new_frame, old_frame, full=False,
+    )
 
     assert events == [
         "init_part", "partial_begin", "draw:old", "partial_old",

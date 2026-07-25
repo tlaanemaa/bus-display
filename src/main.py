@@ -51,7 +51,7 @@ from epd7in5v2 import EPD7in5V2
 
 if False:
     from typing import Any
-    from models import Settings, StopConfig, WifiConfig
+    from models import DisplaySection, RetainedState, Settings, StopConfig, WifiConfig
 
 # `server` (Microdot) is deliberately not imported: USB configuration
 # replaced the setup portal, and its top-level route construction costs RAM.
@@ -197,9 +197,10 @@ def _draw_and_refresh(
     because the heap fragments and MicroPython's GC never compacts. Allocating
     once, when the heap is cleanest, sidesteps that entirely.
 
-    `frame` is the screen content -- the temporary legacy tuple splatted into
-    draw_home() (sections, footer, status). `prev_frame` is the previously-drawn frame,
-    needed as the differential partial's 0x10 old plane.
+    Deep-sleep frames are explicit DisplayFrame dictionaries. The legacy awake
+    path temporarily still supplies its positional outer frame; the compatibility
+    branch below is removed when that path is migrated. `prev_frame` is the
+    previously-drawn frame needed as the differential partial's 0x10 old plane.
 
     `full` picks the refresh mode (see AGENTS.md "Screen refresh strategy"):
     a full refresh flashes black/white and fully discharges every pixel
@@ -217,14 +218,22 @@ def _draw_and_refresh(
     # the panel is powered, so it needs no sleep guard; from epd.init() onward
     # the panel is powered, so everything past it is wrapped to guarantee a
     # power-down (see _safe_sleep) even if a write/busy-wait throws mid-refresh.
+    frame_data = None  # type: Any
     if full:
-        display.draw_home(fb, *frame)
+        # TEMPORARY Task 4/7 bridge: the awake path still has a positional
+        # outer frame while deployed deep sleep already uses DisplayFrame.
+        if isinstance(frame, dict):
+            display.draw_home(fb, frame)
+            frame_data = frame
+        else:
+            display.draw_home(fb, *frame)
+            frame_data = display.make_frame(*frame)
         try:
             epd.init()
             epd.display(fb_buf)
         finally:
             _safe_sleep(epd)
-        print(display.frame_summary(display.make_frame(*frame)))
+        print(display.frame_summary(frame_data))
         return
 
     # Differential partial: old plane (0x10) first, then new plane (0x13).
@@ -234,13 +243,21 @@ def _draw_and_refresh(
     try:
         epd.init_part()
         epd.partial_begin()
-        display.draw_home(fb, *prev_frame)   # OLD frame -> 0x10
+        if isinstance(prev_frame, dict):
+            display.draw_home(fb, prev_frame)
+        else:
+            display.draw_home(fb, *prev_frame)
         epd.partial_old(fb_buf)
-        display.draw_home(fb, *frame)        # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
+        if isinstance(frame, dict):
+            display.draw_home(fb, frame)
+            frame_data = frame
+        else:
+            display.draw_home(fb, *frame)
+            frame_data = display.make_frame(*frame)
         epd.partial_new(fb_buf)
     finally:
         _safe_sleep(epd)
-    print(display.frame_summary(display.make_frame(*frame)))
+    print(display.frame_summary(frame_data))
 
 
 async def _wait_until_epoch(wdt: "Any", target_epoch: int) -> None:
@@ -253,9 +270,20 @@ async def _wait_until_epoch(wdt: "Any", target_epoch: int) -> None:
         await asyncio.sleep(remaining if remaining < _WDT_FEED_CHUNK_S else _WDT_FEED_CHUNK_S)
 
 
-def _rtc_state_load() -> "dict[str, Any] | None":
+def _retained_stop_keys(cfg: "Settings") -> "list[str]":
+    return [
+        "%s:%s" % (stop["site_id"], cfg["direction_code"])
+        for stop in cfg["stops"]
+    ]
+
+
+def _rtc_state_load(cfg: "Settings") -> "RetainedState | None":
     raw = machine.RTC().memory()
-    state = retained.decode(raw)
+    state = retained.decode(
+        raw,
+        retained.settings_fingerprint(cfg),
+        _retained_stop_keys(cfg),
+    )
     if state is None:
         reason = "empty" if not raw else "invalid/corrupt/incompatible"
         print("retained: %s (%d bytes) -- next refresh must be full" % (reason, len(raw)))
@@ -264,7 +292,7 @@ def _rtc_state_load() -> "dict[str, Any] | None":
     return state
 
 
-def _rtc_state_save(state: "dict[str, Any]") -> None:
+def _rtc_state_save(state: "RetainedState", cfg: "Settings") -> None:
     """Write and read back before sleeping; never silently trust retention."""
     raw = retained.encode(state)
     rtc = machine.RTC()
@@ -274,16 +302,20 @@ def _rtc_state_save(state: "dict[str, Any]") -> None:
     # Do not compare decoded JSON to the live Python object: display rows are
     # tuples while JSON canonically restores arrays as lists, so semantically
     # identical state would falsely fail an object-equality check.
-    if readback != raw or retained.decode(readback) is None:
+    if readback != raw or retained.decode(
+        readback,
+        retained.settings_fingerprint(cfg),
+        _retained_stop_keys(cfg),
+    ) is None:
         raise OSError("RTC retained-state readback mismatch")
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
 
 
 def _stale_section(
-    stop_key: str, cfg_stop: "StopConfig", previous: "dict[str, Any] | None",
-) -> "Any":
+    stop_key: str, cfg_stop: "StopConfig", previous: "DisplaySection | None",
+) -> "DisplaySection":
     if previous:
-        section = dict(previous)
+        section = dict(previous)  # type: Any
         section["stop_key"] = stop_key
         section["stale"] = True
         return section
@@ -294,7 +326,7 @@ async def deep_sleep_cycle(
     cfg: "Settings",
     wifi_cfg: "WifiConfig | None",
     connected: bool,
-    state: "dict[str, Any] | None",
+    state: "RetainedState | None",
     request_epoch: int,
     boot_ticks: int,
 ) -> None:
@@ -306,11 +338,10 @@ async def deep_sleep_cycle(
     fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
 
     previous_frame = state.get("frame") if state else None
-    previous_sections = previous_frame[0] if previous_frame else []
+    previous_sections = previous_frame["sections"] if previous_frame else []
     last_full_epoch = state.get("last_full") if state else None
-    last_weather = state.get("weather") if state else None
+    last_weather = state.get("weather") if state else None  # type: Any
     last_weather_time = state.get("weather_time") if state else None
-    last_weather_bucket = state.get("weather_bucket") if state else None
     last_ntp_epoch = state.get("last_ntp") if state else None
 
     lead_observed_ms = time.ticks_diff(time.ticks_ms(), boot_ticks)
@@ -346,6 +377,10 @@ async def deep_sleep_cycle(
     weather_error = False
     if weather_enabled and connected and isinstance(weather_cfg, dict):
         weather_interval_s = weather_cfg.get("pull_interval_min", 30) * 60
+        last_weather_bucket = (
+            int(last_weather_time // weather_interval_s)
+            if last_weather_time is not None else None
+        )
         weather_bucket = int(time.time() // weather_interval_s)
         if last_weather is None or weather_bucket != last_weather_bucket:
             fetched = None
@@ -359,8 +394,7 @@ async def deep_sleep_cycle(
                 print("weather: fetch failed:", e)
             if fetched is not None:
                 last_weather = fetched
-                last_weather_time = time.time()
-                last_weather_bucket = weather_bucket
+                last_weather_time = int(time.time())
                 print("weather: " + weather.summary_text(fetched))
             else:
                 max_age_s = weather_cfg.get("max_age_min", 180) * 60
@@ -377,7 +411,7 @@ async def deep_sleep_cycle(
     if connected and (last_ntp_epoch is None or time.time() - last_ntp_epoch >= 24 * 3600):
         try:
             ntptime.settime()
-            last_ntp_epoch = time.time()
+            last_ntp_epoch = int(time.time())
             print("power: NTP resync ok")
         except Exception as e:
             print("power: NTP resync failed:", e)
@@ -392,7 +426,7 @@ async def deep_sleep_cycle(
     else:
         status = (display.make_status("weather", last_weather)
                   if last_weather else display.make_status("none"))
-    frame = [sections, footer, status]
+    frame = display.make_frame(sections, footer, status)
 
     full_interval_s = cfg.get("full_refresh_interval_min", 60) * 60
     now_epoch = int(time.time())
@@ -407,11 +441,15 @@ async def deep_sleep_cycle(
         print("power: content unchanged -- no panel refresh")
 
     next_state = {
-        "v": 1, "frame": frame, "last_full": last_full_epoch,
+        "v": retained.RETAINED_VERSION,
+        "render_rev": retained.RENDER_REVISION,
+        "settings": retained.settings_fingerprint(cfg),
+        "frame": frame,
+        "last_full": last_full_epoch,
         "weather": last_weather, "weather_time": last_weather_time,
-        "weather_bucket": last_weather_bucket, "last_ntp": last_ntp_epoch,
-    }
-    _rtc_state_save(next_state)
+        "last_ntp": last_ntp_epoch,
+    }  # type: RetainedState
+    _rtc_state_save(next_state, cfg)
 
     advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
     delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)
@@ -699,7 +737,7 @@ async def main() -> None:
     power_cfg = cfg.get("power", {})
     deep_sleep = power_cfg.get("deep_sleep", False)
     wake_advance_s = power_cfg.get("wake_advance_s", 3)
-    state = _rtc_state_load() if deep_sleep else None
+    state = _rtc_state_load(cfg) if deep_sleep else None
     request_epoch = wake_schedule.request_boundary(time.time(), 60)
     wifi_cfg = config.load().get("wifi")
 
