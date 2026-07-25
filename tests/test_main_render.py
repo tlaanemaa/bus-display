@@ -277,6 +277,89 @@ def test_rtc_commit_checks_exact_bytes_and_strict_decode_context(monkeypatch):
     assert rtc.raw == b""
 
 
+@pytest.mark.parametrize(
+    ("failure_stage", "error_type", "message"),
+    [
+        ("write", OSError, "commit write failed"),
+        ("readback", OSError, "commit readback failed"),
+        ("decode", RuntimeError, "commit decode failed"),
+    ],
+)
+def test_rtc_commit_exceptions_attempt_verified_clear_and_reraise_original(
+    monkeypatch, failure_stage, error_type, message,
+):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    expected = _retained_state(main, cfg)
+    raw = main.retained.encode(expected)
+    events = []
+
+    class RTC:
+        stored = b"old"
+        fail_readback = False
+
+        def memory(self, value=None):
+            if value is not None:
+                events.append(("write", value))
+                if value == raw and failure_stage == "write":
+                    raise OSError(message)
+                self.stored = value
+                if value == raw and failure_stage == "readback":
+                    self.fail_readback = True
+                return self.stored
+            events.append(("read", self.stored))
+            if self.fail_readback:
+                self.fail_readback = False
+                raise OSError(message)
+            return self.stored
+
+    rtc = RTC()
+    monkeypatch.setattr(main.machine, "RTC", lambda: rtc)
+    if failure_stage == "decode":
+        monkeypatch.setattr(
+            main.retained,
+            "decode",
+            lambda *_args: (_ for _ in ()).throw(RuntimeError(message)),
+        )
+
+    with pytest.raises(error_type, match=message):
+        main._rtc_commit(
+            raw,
+            main.retained.settings_fingerprint(cfg),
+            ["9192:2"],
+        )
+
+    assert events[-2:] == [("write", b""), ("read", b"")]
+    assert rtc.stored == b""
+
+
+def test_rtc_commit_cleanup_failure_is_reported_without_masking_original(
+    monkeypatch,
+):
+    main = _load_main_without_boot(monkeypatch)
+    printed = []
+
+    class RTC:
+        def memory(self, value=None):
+            if value == b"encoded":
+                raise OSError("commit write failed")
+            raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(main.machine, "RTC", lambda: RTC())
+    monkeypatch.setattr(
+        builtins,
+        "print",
+        lambda *parts: printed.append(" ".join(str(part) for part in parts)),
+    )
+
+    with pytest.raises(OSError, match="commit write failed"):
+        main._rtc_commit(b"encoded", "fingerprint", ["9192:2"])
+
+    assert printed == [
+        "retained: cleanup after failed commit also failed: cleanup failed",
+    ]
+
+
 def test_deep_sleep_policy_does_not_reuse_a_reconfigured_stop_by_position(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     cfg = _cfg()
@@ -362,6 +445,11 @@ def test_changed_deep_sleep_applies_encode_invalidate_refresh_commit_order(monke
     )
     monkeypatch.setattr(
         main,
+        "EPD7in5V2",
+        lambda: events.append("construct_epd") or _EPD(),
+    )
+    monkeypatch.setattr(
+        main,
         "_draw_and_refresh",
         lambda *_args, **_kwargs: events.append("refresh"),
     )
@@ -378,6 +466,7 @@ def test_changed_deep_sleep_applies_encode_invalidate_refresh_commit_order(monke
     assert events == [
         ("encode", proposed),
         "invalidate",
+        "construct_epd",
         "refresh",
         (
             "commit",
@@ -417,6 +506,11 @@ def test_unchanged_deep_sleep_commits_without_invalidation_or_panel(monkeypatch)
     )
     monkeypatch.setattr(
         main,
+        "EPD7in5V2",
+        lambda: events.append("construct_epd") or _EPD(),
+    )
+    monkeypatch.setattr(
+        main,
         "_draw_and_refresh",
         lambda *_args, **_kwargs: events.append("refresh"),
     )
@@ -439,6 +533,53 @@ def test_unchanged_deep_sleep_commits_without_invalidation_or_panel(monkeypatch)
             ["9192:2"],
         ),
     ]
+
+
+def test_encode_failure_does_not_construct_epd_or_touch_rtc(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    previous = _retained_state(main, cfg)
+    proposed = _retained_state(main, cfg)
+    proposed["frame"]["footer"] = ["Lor 25 jul 14:33"]
+    events = []
+    _prepare_deep_sleep_test(monkeypatch, main, 200)
+    monkeypatch.setattr(
+        main.cycle,
+        "decide",
+        lambda *_args: {
+            "frame": proposed["frame"],
+            "refresh": "partial",
+            "state": proposed,
+        },
+    )
+    monkeypatch.setattr(
+        main.retained,
+        "encode",
+        lambda _state: events.append("encode")
+        or (_ for _ in ()).throw(ValueError("oversize")),
+    )
+    monkeypatch.setattr(
+        main,
+        "EPD7in5V2",
+        lambda: events.append("construct_epd") or _EPD(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_invalidate",
+        lambda: events.append("invalidate"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_commit",
+        lambda *_args: events.append("commit"),
+    )
+
+    with pytest.raises(ValueError, match="oversize"):
+        asyncio.run(
+            main.deep_sleep_cycle(cfg, None, False, previous, 200, 0)
+        )
+
+    assert events == ["encode"]
 
 
 def test_successful_refresh_logs_only_the_new_frame(monkeypatch):

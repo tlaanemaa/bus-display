@@ -307,22 +307,32 @@ def _rtc_commit(
     expected_stop_keys: "list[str]",
 ) -> None:
     """Write exact encoded state and independently validate its readback."""
-    rtc = machine.RTC()
-    rtc.memory(raw)
-    readback = rtc.memory()
-    # Compare the exact stored bytes, then independently validate decoding.
-    # Do not compare decoded JSON to the live Python object: display rows are
-    # tuples while JSON canonically restores arrays as lists, so semantically
-    # identical state would falsely fail an object-equality check.
-    if readback != raw or retained.decode(
-        readback,
-        expected_fingerprint,
-        expected_stop_keys,
-    ) is None:
-        # A failed verification must never leave bytes that a later wake could
-        # mistake for the frame physically on the panel.
-        _rtc_invalidate()
-        raise OSError("RTC retained-state readback mismatch")
+    try:
+        rtc = machine.RTC()
+        rtc.memory(raw)
+        readback = rtc.memory()
+        # Compare the exact stored bytes, then independently validate decoding.
+        # Do not compare decoded JSON to the live Python object: display rows
+        # are tuples while JSON canonically restores arrays as lists, so
+        # semantically identical state would falsely fail object equality.
+        if readback != raw or retained.decode(
+            readback,
+            expected_fingerprint,
+            expected_stop_keys,
+        ) is None:
+            raise OSError("RTC retained-state readback mismatch")
+    except Exception:
+        # Any exception after commit starts leaves the stored bytes untrusted.
+        # Best-effort clear them, but preserve the original failure for the
+        # caller; cleanup diagnostics must never replace its cause.
+        try:
+            _rtc_invalidate()
+        except Exception as cleanup_error:
+            print(
+                "retained: cleanup after failed commit also failed:",
+                cleanup_error,
+            )
+        raise
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
 
 
@@ -351,7 +361,6 @@ async def deep_sleep_cycle(
     boot_ticks: int,
 ) -> None:
     """One wake -> boundary-aligned fetch/render -> retained state -> sleep."""
-    epd = EPD7in5V2()
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
     gc.collect()
     fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
@@ -433,6 +442,7 @@ async def deep_sleep_cycle(
         print("power: content changed, %s refresh" % refresh)
 
         def refresh_panel() -> None:
+            epd = EPD7in5V2()
             _draw_and_refresh(
                 epd,
                 fb,
