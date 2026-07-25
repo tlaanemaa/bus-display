@@ -218,7 +218,7 @@ def keep_last_good(
     Within max_age_s the reading is recent enough to still be trustworthy;
     past it we'd rather show the honest error. Configurable via the weather
     block's max_age_min (see settings.example.json)."""
-    if age_s is None:
+    if age_s is None or age_s < 0:
         return False
     return is_for_today(reading, today_iso) and age_s <= max_age_s
 

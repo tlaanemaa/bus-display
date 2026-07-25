@@ -1,5 +1,6 @@
 """Isolated host tests for main.py's post-refresh serial corroboration."""
 import builtins
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -131,6 +132,54 @@ def _retained_state(main, cfg):
     }
 
 
+class _WDT:
+    def feed(self):
+        pass
+
+
+class _WLAN:
+    def active(self, _enabled):
+        pass
+
+
+def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
+    saved = []
+    refreshes = []
+
+    async def no_wait(_wdt, _target):
+        pass
+
+    monkeypatch.setattr(main, "EPD7in5V2", lambda: _EPD())
+    monkeypatch.setattr(main.machine, "WDT", lambda timeout: _WDT())
+    monkeypatch.setattr(main.framebuf, "FrameBuffer", lambda *_args: object())
+    monkeypatch.setattr(main, "_wait_until_epoch", no_wait)
+    monkeypatch.setattr(main.time, "time", lambda: now_epoch)
+    monkeypatch.setattr(main.time, "ticks_ms", lambda: 10, raising=False)
+    monkeypatch.setattr(main.time, "ticks_diff", lambda a, b: a - b, raising=False)
+    monkeypatch.setattr(main, "_local_now_strings", lambda: ("Lor 25 jul", "14:32"))
+    monkeypatch.setattr(main, "_local_today_iso", lambda: "2026-07-25")
+    monkeypatch.setattr(
+        main,
+        "_draw_and_refresh",
+        lambda _epd, _fb, _buf, frame, old, full: refreshes.append(
+            (frame, old, full)
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_state_save",
+        lambda state, _cfg: saved.append(state),
+    )
+    monkeypatch.setattr(
+        main.wake_schedule,
+        "next_wake_delay_s",
+        lambda _now, _advance, _interval: 57,
+    )
+    monkeypatch.setattr(main.network, "WLAN", lambda _kind: _WLAN())
+    monkeypatch.setattr(main.machine, "deepsleep", lambda _ms: None)
+    return saved, refreshes
+
+
 def test_rtc_load_uses_settings_and_stop_identity(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     cfg = _cfg()
@@ -167,6 +216,62 @@ def test_rtc_save_verifies_using_current_compatibility_context(monkeypatch):
         main.retained.settings_fingerprint(cfg),
         ["9192:2"],
     ) == expected
+
+
+def test_deep_sleep_policy_does_not_reuse_a_reconfigured_stop_by_position(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    cfg["stops"] = [{"name": "Nacka", "site_id": 1234}]
+    old_cfg = _cfg()
+    previous = _retained_state(main, old_cfg)
+    previous["frame"]["sections"][0]["dest"] = "Old departure"
+    previous["last_ntp"] = 199
+    saved, refreshes = _prepare_deep_sleep_test(monkeypatch, main, 200)
+    monkeypatch.setattr(main, "_fetch_all_stops", lambda *_args, **_kwargs: [None])
+
+    asyncio.run(main.deep_sleep_cycle(cfg, None, True, previous, 200, 0))
+
+    assert saved[0]["frame"]["sections"][0]["dest"] == "No departures"
+    assert saved[0]["frame"]["sections"][0]["stale"] is True
+    assert refreshes[0][2] is True
+
+
+def test_deep_sleep_weather_future_timestamp_forces_an_adapter_attempt(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    cfg["weather"] = {
+        "enabled": True,
+        "latitude": 59.33,
+        "longitude": 18.06,
+        "pull_interval_min": 30,
+        "max_age_min": 180,
+    }
+    previous = _retained_state(main, cfg)
+    previous["weather"] = {
+        "date": "2026-07-25",
+        "condition": "cloudy",
+        "tmin": 10,
+        "tmax": 20,
+        "precip": 20,
+    }
+    previous["weather_time"] = 200
+    previous["last_ntp"] = 99
+    fetched = {
+        "date": "2026-07-25",
+        "condition": "clear",
+        "tmin": 12,
+        "tmax": 21,
+        "precip": 5,
+    }
+    saved, _refreshes = _prepare_deep_sleep_test(monkeypatch, main, 100)
+    monkeypatch.setattr(main, "_fetch_all_stops", lambda *_args, **_kwargs: [[]])
+    monkeypatch.setattr(main.openmeteo, "fetch_today", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main.weather, "parse_weather", lambda _raw: fetched)
+
+    asyncio.run(main.deep_sleep_cycle(cfg, None, True, previous, 100, 0))
+
+    assert saved[0]["weather"] == fetched
+    assert saved[0]["weather_time"] == 100
 
 
 def test_successful_refresh_logs_only_the_new_frame(monkeypatch):

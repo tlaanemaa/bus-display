@@ -46,12 +46,13 @@ import localtime
 import openmeteo
 import weather
 import retained
+import cycle
 import wake_schedule
 from epd7in5v2 import EPD7in5V2
 
 if False:
     from typing import Any
-    from models import DisplaySection, RetainedState, Settings, StopConfig, WifiConfig
+    from models import RetainedState, Settings, WifiConfig
 
 # `server` (Microdot) is deliberately not imported: USB configuration
 # replaced the setup portal, and its top-level route construction costs RAM.
@@ -311,17 +312,6 @@ def _rtc_state_save(state: "RetainedState", cfg: "Settings") -> None:
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
 
 
-def _stale_section(
-    stop_key: str, cfg_stop: "StopConfig", previous: "DisplaySection | None",
-) -> "DisplaySection":
-    if previous:
-        section = dict(previous)  # type: Any
-        section["stop_key"] = stop_key
-        section["stale"] = True
-        return section
-    return display.stop_section(stop_key, cfg_stop["name"], [], stale=True)
-
-
 async def deep_sleep_cycle(
     cfg: "Settings",
     wifi_cfg: "WifiConfig | None",
@@ -337,12 +327,9 @@ async def deep_sleep_cycle(
     fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
     fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
 
-    previous_frame = state.get("frame") if state else None
-    previous_sections = previous_frame["sections"] if previous_frame else []
-    last_full_epoch = state.get("last_full") if state else None
-    last_weather = state.get("weather") if state else None  # type: Any
-    last_weather_time = state.get("weather_time") if state else None
-    last_ntp_epoch = state.get("last_ntp") if state else None
+    previous_frame = state["frame"] if state else None
+    last_weather_time = state["weather_time"] if state else None
+    last_ntp_epoch = state["last_ntp"] if state else None
 
     lead_observed_ms = time.ticks_diff(time.ticks_ms(), boot_ticks)
     print("power: preparation took %d ms; requests target epoch %d" % (lead_observed_ms, request_epoch))
@@ -360,51 +347,31 @@ async def deep_sleep_cycle(
         # the continuously-awake mode retains its original 3-attempt policy.
         results = _fetch_all_stops(cfg, retries=1, wdt=wdt)
 
-    sections = []  # type: list[Any]
-    for i, stop in enumerate(cfg["stops"]):
-        stop_key = "%s:%s" % (stop["site_id"], cfg["direction_code"])
-        result = results[i]
-        if result is not None:
-            sections.append(display.stop_section(stop_key, stop["name"], result, stale=False))
-        else:
-            old = previous_sections[i] if i < len(previous_sections) else None
-            sections.append(_stale_section(stop_key, stop, old))
-
-    weather_cfg = cfg.get("weather")
-    weather_enabled = bool(weather_cfg and weather_cfg.get("enabled", True)
-                           and weather_cfg.get("latitude") is not None
-                           and weather_cfg.get("longitude") is not None)
-    weather_error = False
-    if weather_enabled and connected and isinstance(weather_cfg, dict):
-        weather_interval_s = weather_cfg.get("pull_interval_min", 30) * 60
-        last_weather_bucket = (
-            int(last_weather_time // weather_interval_s)
-            if last_weather_time is not None else None
+    weather_cfg = cfg["weather"]
+    weather_attempted = False
+    weather_result = None  # type: Any
+    if (
+        connected
+        and weather_cfg is not None
+        and cycle.weather_due(
+            int(time.time()),
+            last_weather_time,
+            weather_cfg["pull_interval_min"] * 60,
         )
-        weather_bucket = int(time.time() // weather_interval_s)
-        if last_weather is None or weather_bucket != last_weather_bucket:
-            fetched = None
-            try:
-                wdt.feed()
-                fetched = weather.parse_weather(openmeteo.fetch_today(
-                    weather_cfg["latitude"], weather_cfg["longitude"],
-                    retries=1))
-                wdt.feed()
-            except Exception as e:
-                print("weather: fetch failed:", e)
-            if fetched is not None:
-                last_weather = fetched
-                last_weather_time = int(time.time())
-                print("weather: " + weather.summary_text(fetched))
+    ):
+        weather_attempted = True
+        try:
+            wdt.feed()
+            weather_result = weather.parse_weather(openmeteo.fetch_today(
+                weather_cfg["latitude"], weather_cfg["longitude"],
+                retries=1))
+            wdt.feed()
+            if weather_result is None:
+                print("weather: unusable payload")
             else:
-                max_age_s = weather_cfg.get("max_age_min", 180) * 60
-                age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
-                weather_error = not weather.keep_last_good(
-                    last_weather, _local_today_iso(), age_s, max_age_s)
-    elif weather_enabled and isinstance(weather_cfg, dict):
-        max_age_s = weather_cfg.get("max_age_min", 180) * 60
-        age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
-        weather_error = not weather.keep_last_good(last_weather, _local_today_iso(), age_s, max_age_s)
+                print("weather: " + weather.summary_text(weather_result))
+        except Exception as e:
+            print("weather: fetch failed:", e)
 
     # RTC survives deep sleep. Resync at most daily, after the boundary so
     # ordinary wakes perform no network request before :00.
@@ -416,40 +383,37 @@ async def deep_sleep_cycle(
         except Exception as e:
             print("power: NTP resync failed:", e)
 
+    now_epoch = int(time.time())
+    today_iso = _local_today_iso()
     date_str, time_str = _local_now_strings()
     footer = display.footer_lines(date_str, time_str)
-    status = None  # type: Any
-    if not connected:
-        status = display.make_status("wifi_error")
-    elif weather_error:
-        status = display.make_status("weather_error")
-    else:
-        status = (display.make_status("weather", last_weather)
-                  if last_weather else display.make_status("none"))
-    frame = display.make_frame(sections, footer, status)
-
-    full_interval_s = cfg.get("full_refresh_interval_min", 60) * 60
-    now_epoch = int(time.time())
-    full = (previous_frame is None or last_full_epoch is None
-            or now_epoch - last_full_epoch >= full_interval_s)
-    if frame != previous_frame:
-        print("power: content changed, %s refresh" % ("full" if full else "partial"))
-        _draw_and_refresh(epd, fb, fb_buf, frame, previous_frame, full)
-        if full:
-            last_full_epoch = now_epoch
+    decision = cycle.decide(
+        cfg,
+        state,
+        results,
+        connected,
+        weather_attempted,
+        weather_result,
+        now_epoch,
+        today_iso,
+        footer,
+        last_ntp_epoch,
+    )
+    refresh = decision["refresh"]
+    if refresh != "none":
+        print("power: content changed, %s refresh" % refresh)
+        _draw_and_refresh(
+            epd,
+            fb,
+            fb_buf,
+            decision["frame"],
+            previous_frame,
+            refresh == "full",
+        )
     else:
         print("power: content unchanged -- no panel refresh")
 
-    next_state = {
-        "v": retained.RETAINED_VERSION,
-        "render_rev": retained.RENDER_REVISION,
-        "settings": retained.settings_fingerprint(cfg),
-        "frame": frame,
-        "last_full": last_full_epoch,
-        "weather": last_weather, "weather_time": last_weather_time,
-        "last_ntp": last_ntp_epoch,
-    }  # type: RetainedState
-    _rtc_state_save(next_state, cfg)
+    _rtc_state_save(decision["state"], cfg)
 
     advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
     delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)

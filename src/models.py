@@ -45,6 +45,9 @@ if False:
         destination: str
         display: str
 
+    DepartureResult = list[dict[str, str]] | None
+    RefreshMode = Literal["none", "partial", "full"]
+
     class WeatherReading(TypedDict):
         date: str
         condition: str
@@ -99,7 +102,7 @@ if False:
 
     class CycleDecision(TypedDict):
         frame: DisplayFrame
-        refresh: Literal["none", "partial", "full"]
+        refresh: RefreshMode
         state: RetainedState
 
     class FrameBufferLike(Protocol):
