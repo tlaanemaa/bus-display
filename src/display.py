@@ -540,7 +540,8 @@ def frame_summary(frame: "DisplayFrame") -> str:
             lines.append("%s  %s" % (section["badge_line"], section["dest"]))
         else:
             lines.append(section["dest"])
-        lines.extend("%s  %s  %s" % row for row in section["rows"])
+        for row in section["rows"]:
+            lines.append("%s  %s  %s" % (row[0], row[1], row[2]))
 
     status = frame["status"]  # type: Any
     kind = status["kind"]

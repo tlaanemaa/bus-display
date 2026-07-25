@@ -788,6 +788,76 @@ def test_successful_refresh_logs_only_the_new_frame(monkeypatch):
     assert printed == ["summary:new"]
 
 
+def test_summary_failure_happens_before_any_panel_operation(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    events = []
+    frame = {"sections": [{"name": "new"}], "footer": ["footer"], "status": {"kind": "none"}}
+    monkeypatch.setattr(
+        main.display,
+        "frame_summary",
+        lambda _frame: (_ for _ in ()).throw(ValueError("bad summary")),
+    )
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, _frame: None)
+
+    with pytest.raises(ValueError, match="bad summary"):
+        main._draw_and_refresh(_EPD(events=events), object(), bytearray(), frame, None, full=True)
+
+    assert events == []
+
+
+def test_summary_print_failure_after_visible_write_does_not_fail_transaction(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    previous = _retained_state(main, cfg)
+    proposed = _retained_state(main, cfg)
+    proposed["frame"]["footer"] = ["Lor 25 jul 14:33"]
+    events = []
+    panel_events = []
+
+    monkeypatch.setattr(main.machine, "WDT", lambda timeout: _WDT())
+    monkeypatch.setattr(main, "_wait_until_epoch", lambda _wdt, _target: None)
+    monkeypatch.setattr(main.time, "time", lambda: 200)
+    monkeypatch.setattr(main.time, "ticks_ms", lambda: 10, raising=False)
+    monkeypatch.setattr(main.time, "ticks_diff", lambda a, b: a - b, raising=False)
+    monkeypatch.setattr(main, "_local_now_strings", lambda: ("Lor 25 jul", "14:33"))
+    monkeypatch.setattr(main, "_local_today_iso", lambda: "2026-07-25")
+    monkeypatch.setattr(
+        main.cycle,
+        "decide",
+        lambda *_args: {"frame": proposed["frame"], "refresh": "partial", "state": proposed},
+    )
+    monkeypatch.setattr(
+        main.retained,
+        "encode",
+        lambda state: events.append(("encode", state)) or b"encoded",
+    )
+    monkeypatch.setattr(main, "_rtc_invalidate", lambda: events.append("invalidate"))
+    monkeypatch.setattr(
+        main,
+        "_rtc_commit",
+        lambda raw, _fingerprint, _keys: events.append(("commit", raw)),
+    )
+    monkeypatch.setattr(main, "EPD7in5V2", lambda: _EPD(events=panel_events))
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, _frame: None)
+    monkeypatch.setattr(main.display, "frame_summary", lambda _frame: "summary:new")
+    monkeypatch.setattr(main.wake_schedule, "next_wake_delay_s", lambda *_args: 57)
+
+    def print_summary_only(*parts):
+        if parts == ("summary:new",):
+            raise OSError("serial unavailable")
+
+    monkeypatch.setattr(builtins, "print", print_summary_only)
+
+    main.deep_sleep_cycle(
+        cfg, False, previous, 200, 0, previous["last_ntp"], object(), bytearray(),
+    )
+
+    assert events == [("encode", proposed), "invalidate", ("commit", b"encoded")]
+    assert panel_events == [
+        "init_part", "partial_begin", "partial_old", "partial_new", "sleep",
+    ]
+
+
 def test_successful_refresh_accepts_explicit_display_frame(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     draws = []

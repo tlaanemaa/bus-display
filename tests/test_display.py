@@ -119,6 +119,31 @@ def test_frame_summary_reports_only_the_supplied_visible_frame():
     assert "Weather error" in summary
 
 
+def test_frame_summary_formats_secondary_rows_and_weather_status():
+    frame = display.make_frame(
+        [{
+            "stop_key": "9192:2",
+            "name": "Slussen",
+            "hero_main": "4",
+            "hero_unit": "min",
+            "badge_line": "474",
+            "dest": "Hemmesta",
+            "rows": [["440", "Slussen", "12 min"]],
+            "stale": False,
+        }],
+        ["Lor 25 jul 14:32"],
+        display.make_status("weather", {
+            "date": "2026-07-25", "condition": "rain",
+            "tmin": 12, "tmax": 20, "precip": 40,
+        }),
+    )
+
+    summary = display.frame_summary(frame)
+
+    assert "440  Slussen  12 min" in summary
+    assert "weather: rain" in summary
+
+
 def test_draw_home_stays_inside_physical_buffer_and_two_full_sections_fit():
     """Regression guard for the "content ran into the footer" scare --
     two stops x 3 departures each (the max the owner wants) must not

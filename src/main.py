@@ -93,6 +93,8 @@ def _draw_and_refresh(
     full: bool,
 ) -> None:
     """Write a full frame or a true old/new differential, then sleep panel."""
+    summary = display.frame_summary(frame)
+
     if full:
         display.draw_home(fb, frame)
         try:
@@ -100,7 +102,7 @@ def _draw_and_refresh(
             epd.display(fb_buf)
         finally:
             _safe_sleep(epd)
-        print(display.frame_summary(frame))
+        _print_summary(summary)
         return
 
     assert prev_frame is not None
@@ -113,7 +115,15 @@ def _draw_and_refresh(
         epd.partial_new(fb_buf)
     finally:
         _safe_sleep(epd)
-    print(display.frame_summary(frame))
+    _print_summary(summary)
+
+
+def _print_summary(summary: str) -> None:
+    """Best-effort serial corroboration after a successful panel write."""
+    try:
+        print(summary)
+    except Exception:
+        pass
 
 
 def _wait_until_epoch(wdt: "Any", target_epoch: int) -> None:
