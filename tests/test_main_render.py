@@ -279,6 +279,54 @@ def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
     return saved, refreshes
 
 
+def test_deep_sleep_cycle_reuses_supplied_framebuffer_without_allocating(
+    monkeypatch,
+):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    previous = _retained_state(main, cfg)
+    supplied_fb = object()
+    supplied_buf = builtins.bytearray(
+        main._FB_WIDTH * main._FB_HEIGHT // 8
+    )
+    refresh_args = []
+    _prepare_deep_sleep_test(monkeypatch, main, 200)
+
+    def reject_framebuffer(*_args):
+        raise AssertionError("deep_sleep_cycle constructed a second FrameBuffer")
+
+    def reject_full_buffer(size=0):
+        if size == main._FB_WIDTH * main._FB_HEIGHT // 8:
+            raise AssertionError(
+                "deep_sleep_cycle allocated a second full framebuffer"
+            )
+        return builtins.bytearray(size)
+
+    def draw(_epd, fb, fb_buf, frame, old, full):
+        refresh_args.append((fb, fb_buf, frame, old, full))
+
+    monkeypatch.setattr(main.framebuf, "FrameBuffer", reject_framebuffer)
+    monkeypatch.setattr(main, "bytearray", reject_full_buffer, raising=False)
+    monkeypatch.setattr(main, "_draw_and_refresh", draw)
+
+    asyncio.run(
+        main.deep_sleep_cycle(
+            cfg,
+            None,
+            False,
+            previous,
+            200,
+            0,
+            supplied_fb,
+            supplied_buf,
+        )
+    )
+
+    assert len(refresh_args) == 1
+    assert refresh_args[0][0] is supplied_fb
+    assert refresh_args[0][1] is supplied_buf
+
+
 def test_rtc_load_uses_settings_and_stop_identity(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     cfg = _cfg()
