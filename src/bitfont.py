@@ -165,6 +165,10 @@ class Font:
                 self._adv[ord(ch)] = adv
                 row_bytes = (w + 7) >> 3
                 nbytes = row_bytes * h
+                if nbytes > len(_GBUF):
+                    raise ValueError(
+                        "glyph bitmap exceeds scratch buffer: %d > %d" % (nbytes, len(_GBUF))
+                    )
                 f.seek(off)
                 f.readinto(mv[:nbytes])
                 for gy in range(h):

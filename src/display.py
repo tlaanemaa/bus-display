@@ -34,6 +34,7 @@ import bitfont
 
 if False:
     from typing import Any, Callable
+    from models import DisplayFrame, DisplaySection, DisplayStatus
 
 
 PHYS_W = 800  # native physical buffer, fixed by the panel
@@ -462,8 +463,11 @@ def draw_weather_glyph(
 
 
 def stop_section(
-    name: str, deps: "list[dict[str, str]]", stale: bool = False,
-) -> "dict[str, Any]":
+    stop_key: str,
+    name: "Any",
+    deps: "list[dict[str, str]] | None" = None,
+    stale: bool = False,
+) -> "DisplaySection":
     """Pure: content for one stop's section (no drawing) -- the hero
     departure split into (main, unit) for the two-size hero treatment,
     its route badge + destination (truncated to fit at head size), and
@@ -479,9 +483,15 @@ def stop_section(
     Not framebuffer-pure: it measures with the real fonts (opening them
     from flash) so truncation matches the ink. That's fine on host too --
     the .fnt files are plain data both places."""
+    # TEMPORARY Task 4 compatibility: legacy main.py passes (name, deps).
+    # Remove this branch once its cycle builders pass the explicit stop key.
+    if deps is None:
+        deps = name
+        name = stop_key
+
     import departures
     if not deps:
-        return {"name": name, "hero_main": None, "hero_unit": None,
+        return {"stop_key": stop_key, "name": name, "hero_main": None, "hero_unit": None,
                 "badge_line": None, "dest": "No departures", "rows": [], "stale": stale}
 
     f = _fonts()
@@ -498,23 +508,59 @@ def stop_section(
         bw = _badge_w(row, dep["line"], BADGE_PAD_X_ROW)
         time_w = row.measure(dep["display"])
         dest_max_w = CONTENT_W - bw - GAP_BADGE_DEST - time_w - GAP_DEST_TIME
-        rows.append((dep["line"], _truncate_to_width(row, dep["destination"], dest_max_w), dep["display"]))
+        rows.append([dep["line"], _truncate_to_width(row, dep["destination"], dest_max_w), dep["display"]])
 
-    return {"name": name, "hero_main": hero_main, "hero_unit": hero_unit,
+    return {"stop_key": stop_key, "name": name, "hero_main": hero_main, "hero_unit": hero_unit,
             "badge_line": badge_line, "dest": dest, "rows": rows, "stale": stale}
 
 
-def section_lines(section: "dict[str, Any]") -> "list[str]":
-    """Flat list of every text string a section contains, in display
-    order -- used for change-detection and serial logging."""
-    lines = [section["name"] + (" STALE" if section.get("stale") else "")]
-    if section["hero_main"] is not None:
-        lines.append(section["hero_main"] + (" " + section["hero_unit"] if section["hero_unit"] else ""))
-        lines.append("%s  %s" % (section["badge_line"], section["dest"]))
+def make_status(kind: str, reading: "Any" = None) -> "DisplayStatus":
+    """Create one JSON-native, discriminated footer status."""
+    if kind == "weather":
+        if reading is None:
+            raise ValueError("weather status requires a reading")
+        return {"kind": "weather", "reading": reading}
+    if kind == "none":
+        return {"kind": "none"}
+    if kind == "wifi_error":
+        return {"kind": "wifi_error"}
+    if kind == "weather_error":
+        return {"kind": "weather_error"}
+    raise ValueError("unknown display status: " + kind)
+
+
+def make_frame(
+    sections: "list[DisplaySection]", footer: "list[str]", status: "DisplayStatus",
+) -> "DisplayFrame":
+    """Combine the exact JSON-native content needed to redraw the screen."""
+    return {"sections": sections, "footer": footer, "status": status}
+
+
+def frame_summary(frame: "DisplayFrame") -> str:
+    """One serial line describing exactly the supplied visible frame."""
+    lines = []
+    for section in frame["sections"]:
+        lines.append(section["name"].upper() + (" STALE" if section.get("stale") else ""))
+        if section["hero_main"] is not None:
+            lines.append(section["hero_main"] + (" " + section["hero_unit"] if section["hero_unit"] else ""))
+            lines.append("%s  %s" % (section["badge_line"], section["dest"]))
+        else:
+            lines.append(section["dest"])
+        lines.extend("%s  %s  %s" % row for row in section["rows"])
+
+    status = frame["status"]  # type: Any
+    kind = status["kind"]
+    if kind == "wifi_error":
+        status_text = "Wi-Fi unavailable"
+    elif kind == "weather_error":
+        status_text = "Weather error"
+    elif kind == "weather":
+        import weather as wx
+        status_text = wx.summary_text(status["reading"])
     else:
-        lines.append(section["dest"])
-    lines.extend("%s  %s  %s" % row for row in section["rows"])
-    return lines
+        import weather as wx
+        status_text = wx.summary_text(None)
+    return "display: home screen -- " + " | ".join(lines) + " || " + " | ".join(frame["footer"]) + " || " + status_text
 
 
 def footer_lines(date_str: str, time_str: str) -> "list[str]":
@@ -546,7 +592,7 @@ def _weather_cluster_width(
 
 
 def _draw_footer_status_line(
-    fb: "Any", weather: "dict[str, Any]", datetime_str: str, ly: int,
+    fb: "Any", weather: "Any", datetime_str: str, ly: int,
 ) -> None:
     """Draw the one-line footer at logical y `ly`: the weather cluster
     (condition glyph + high/low + optional rain %) left-aligned, the
@@ -595,31 +641,32 @@ def _draw_footer_error_line(
     _text_right(fb, row_f, datetime_str, CONTENT_X0 + CONTENT_W, ty)
 
 
-WEATHER_ERROR = "error"  # sentinel for the `weather` param: fetch failed, show an explicit message
-WIFI_ERROR = "wifi_error"  # no network: make an unattended wall display explicitly honest
-
-
 def draw_home(
     fb: "Any",
-    sections: "list[dict[str, Any]]",
-    footer: "list[str]",
-    weather: "dict[str, Any] | str | None" = None,
+    frame: "Any",
+    footer: "list[str] | None" = None,
+    status: "DisplayStatus | None" = None,
 ) -> "tuple[int, int]":
     """Draws each stop's section (from stop_section()) top-to-bottom, then the
     footer (from footer_lines(), plus weather) anchored near the bottom. A
-    stop whose data is stale gets a STALE badge after its name. `weather` is
-    a dict from weather.parse_weather() for a normal footer, WEATHER_ERROR to
-    show "Weather error" in place of the cluster (fetch failed -- don't show
-    a possibly-old reading as current), or None/falsy to fall back to a plain
-    centered date/time (weather disabled). Logs everything to serial
-    (AGENTS.md "make the code corroborate the screen"). Returns
+    stop whose data is stale gets a STALE badge after its name. The explicit
+    frame status selects the footer branch. Returns
     (content_bottom, footer_top) logical-y coordinates so callers/tests can
     check content didn't grow into the footer."""
+    # TEMPORARY Task 4 compatibility: current main.py still splats its old
+    # (sections, footer, status) tuple into this function. Remove once main.py
+    # constructs DisplayFrame values directly.
+    if footer is not None:
+        frame_data = make_frame(frame, footer, status or make_status("none"))
+    else:
+        frame_data = frame
+    sections = frame_data["sections"]
+    footer = frame_data["footer"]
+    status = frame_data["status"]
     f = _fonts()
     hero_f, head_f, row_f = f["hero"], f["head"], f["row"]
 
     fb.fill(0)
-    logged = []
     y = CONTENT_Y0
 
     for gi, section in enumerate(sections):
@@ -638,8 +685,6 @@ def draw_home(
         y += head_f.height + GAP_LABEL_RULE
         _fill_rect(fb, CONTENT_X0, y, CONTENT_W, RULE_HEIGHT, 1)
         y += RULE_HEIGHT + GAP_RULE_HERO
-        logged.append(name + (" STALE" if section.get("stale") else ""))
-
         if section["hero_main"] is not None:
             hw = _text(fb, hero_f, section["hero_main"], CONTENT_X0, y)
             if section["hero_unit"]:
@@ -648,17 +693,14 @@ def draw_home(
                       y + hero_f.baseline - head_f.baseline)
             y += hero_f.height + GAP_HERO_LINE
 
-            bw, bh = _badge(fb, head_f, section["badge_line"], CONTENT_X0, y,
+            bw, bh = _badge(fb, head_f, section["badge_line"] or "", CONTENT_X0, y,
                             BADGE_PAD_X_HEADLINE, BADGE_PAD_Y_HEADLINE)
             _text(fb, head_f, section["dest"], CONTENT_X0 + bw + GAP_BADGE_DEST,
                   y + (bh - head_f.height) // 2)
             y += bh
-            logged.append(section["hero_main"] + ((" " + section["hero_unit"]) if section["hero_unit"] else ""))
-            logged.append("%s  %s" % (section["badge_line"], section["dest"]))
         else:
             _text(fb, head_f, section["dest"], CONTENT_X0, y)
             y += head_f.height
-            logged.append(section["dest"])
 
         if section["rows"]:
             y += GAP_LINE_ROWS
@@ -668,7 +710,6 @@ def draw_home(
                 _text(fb, row_f, dest, CONTENT_X0 + bw + GAP_BADGE_DEST, ty)
                 _text_right(fb, row_f, disp, CONTENT_X0 + CONTENT_W, ty)
                 y += bh + GAP_ROW
-                logged.append("%s  %s  %s" % (line, dest, disp))
             y -= GAP_ROW
 
     content_bottom = y  # logical y just past the last section, before the footer
@@ -678,18 +719,18 @@ def draw_home(
     # separation from the departures above is just the whitespace freed by not
     # stacking a weather row over the clock. Without weather it falls back to
     # the original centered date/time line(s).
-    if weather == WIFI_ERROR:
+    if status["kind"] == "wifi_error":
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
         _draw_footer_error_line(fb, "Wi-Fi unavailable", " ".join(footer), footer_top)
-    elif weather == WEATHER_ERROR:
+    elif status["kind"] == "weather_error":
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
         _draw_footer_error_line(fb, "Weather error", " ".join(footer), footer_top)
-    elif isinstance(weather, dict):
+    elif status["kind"] == "weather":
         band_h = _footer_line_height()
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - band_h
-        _draw_footer_status_line(fb, weather, " ".join(footer), footer_top)
+        _draw_footer_status_line(fb, status["reading"], " ".join(footer), footer_top)
     else:
         text_h = len(footer) * row_f.height + max(0, len(footer) - 1) * GAP_ROW
         footer_top = DRAW_Y0 + DRAW_H - FOOTER_MARGIN - text_h
@@ -698,17 +739,6 @@ def draw_home(
             _text_centered(fb, row_f, line, fy)
             fy += row_f.height + GAP_ROW
 
-    if weather == WIFI_ERROR:
-        weather_summary = "wifi: unavailable"
-    elif weather == WEATHER_ERROR:
-        weather_summary = "weather: error"
-    elif isinstance(weather, dict) or weather is None:
-        import weather as wx
-        weather_summary = wx.summary_text(weather)
-    else:
-        weather_summary = "weather: unavailable"
-    print("display: home screen -- " + " | ".join(logged) + " || "
-          + " | ".join(footer) + " || " + weather_summary)
     # Returned so callers/tests can assert content didn't run into the footer
     # band (the FakeFB in tests only guards the physical buffer bounds).
     return content_bottom, footer_top

@@ -279,7 +279,7 @@ def _rtc_state_save(state: "dict[str, Any]") -> None:
 
 def _stale_section(
     cfg_stop: "StopConfig", previous: "dict[str, Any] | None",
-) -> "dict[str, Any]":
+) -> "Any":
     if previous:
         section = dict(previous)
         section["stale"] = True
@@ -326,7 +326,7 @@ async def deep_sleep_cycle(
         # the continuously-awake mode retains its original 3-attempt policy.
         results = _fetch_all_stops(cfg, retries=1, wdt=wdt)
 
-    sections = []
+    sections = []  # type: list[Any]
     for i, stop in enumerate(cfg["stops"]):
         result = results[i]
         if result is not None:
@@ -382,11 +382,12 @@ async def deep_sleep_cycle(
     footer = display.footer_lines(date_str, time_str)
     status = None  # type: Any
     if not connected:
-        status = display.WIFI_ERROR
+        status = display.make_status("wifi_error")
     elif weather_error:
-        status = display.WEATHER_ERROR
+        status = display.make_status("weather_error")
     else:
-        status = last_weather
+        status = (display.make_status("weather", last_weather)
+                  if last_weather else display.make_status("none"))
     frame = [sections, footer, status]
 
     full_interval_s = cfg.get("full_refresh_interval_min", 60) * 60
@@ -649,13 +650,12 @@ async def display_loop(
         # last-good as current once this pull has failed (see the weather
         # pull above). weather_enabled and no pull yet -> plain None, same as
         # weather disabled, until the first pull attempt resolves either way.
-        weather_for_frame = display.WEATHER_ERROR if weather_error else last_weather
+        weather_for_frame = (display.make_status("weather_error") if weather_error
+                             else (display.make_status("weather", last_weather)
+                                   if last_weather else display.make_status("none")))
         frame = (sections, footer, weather_for_frame)
-        flat = []
-        for section in sections:
-            flat.extend(display.section_lines(section))
-        weather_key = "weather: error" if weather_error else weather.summary_text(last_weather)
-        rendered_key = "\n".join(flat + footer + [weather_key])
+        rendered_key = display.frame_summary(
+            display.make_frame(sections, footer, weather_for_frame))
 
         now = time.ticks_ms()
         full_due = (

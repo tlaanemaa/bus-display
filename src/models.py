@@ -62,9 +62,25 @@ if False:
         rows: list[list[str]]
         stale: bool
 
-    class DisplayStatus(TypedDict):
-        kind: Literal["none", "wifi_error", "weather_error", "weather"]
-        reading: NotRequired[WeatherReading]
+    class DisplayStatusNone(TypedDict):
+        kind: Literal["none"]
+
+    class DisplayStatusWifiError(TypedDict):
+        kind: Literal["wifi_error"]
+
+    class DisplayStatusWeatherError(TypedDict):
+        kind: Literal["weather_error"]
+
+    class DisplayStatusWeather(TypedDict):
+        kind: Literal["weather"]
+        reading: WeatherReading
+
+    DisplayStatus = (
+        DisplayStatusNone
+        | DisplayStatusWifiError
+        | DisplayStatusWeatherError
+        | DisplayStatusWeather
+    )
 
     class DisplayFrame(TypedDict):
         sections: list[DisplaySection]
