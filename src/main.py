@@ -81,6 +81,19 @@ _FB_HEIGHT = 480
 _WIFI_RECONNECT_AFTER_FAILS = 3
 
 
+def _allocate_framebuffer() -> "tuple[Any, bytearray]":
+    """Reserve the one full-screen buffer while the boot heap is clean."""
+    gc.collect()
+    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
+    fb = framebuf.FrameBuffer(
+        fb_buf,
+        _FB_WIDTH,
+        _FB_HEIGHT,
+        framebuf.MONO_HLSB,
+    )
+    return fb, fb_buf
+
+
 def _fetch_all_stops(
     cfg: "Settings", wdt: "Any | None" = None,
 ) -> "list[list[dict[str, str]] | None]":
@@ -359,12 +372,11 @@ async def deep_sleep_cycle(
     state: "RetainedState | None",
     request_epoch: int,
     boot_ticks: int,
+    fb: "Any",
+    fb_buf: bytearray,
 ) -> None:
     """One wake -> boundary-aligned fetch/render -> retained state -> sleep."""
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
-    gc.collect()
-    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
-    fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
 
     previous_frame = state["frame"] if state else None
     last_weather_time = state["weather_time"] if state else None
@@ -756,9 +768,13 @@ async def main() -> None:
     power_cfg = cfg.get("power", {})
     deep_sleep = power_cfg.get("deep_sleep", False)
     wake_advance_s = power_cfg.get("wake_advance_s", 3)
+    wifi_cfg = config.load().get("wifi")
+    deep_sleep_fb = None  # type: Any
+    deep_sleep_fb_buf = None  # type: bytearray | None
+    if deep_sleep:
+        deep_sleep_fb, deep_sleep_fb_buf = _allocate_framebuffer()
     state = _rtc_state_load(cfg) if deep_sleep else None
     request_epoch = wake_schedule.request_boundary(time.time(), 60)
-    wifi_cfg = config.load().get("wifi")
 
     connected = False
     if wifi_cfg and wifi_cfg.get("ssid"):
@@ -802,7 +818,17 @@ async def main() -> None:
                 print("main: cold-boot NTP sync failed:", e)
             request_epoch = wake_schedule.request_boundary(time.time(), 60)
         print("main: deep-sleep mode; wake advance = %d s" % wake_advance_s)
-        await deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_ticks)
+        assert deep_sleep_fb_buf is not None
+        await deep_sleep_cycle(
+            cfg,
+            wifi_cfg,
+            connected,
+            state,
+            request_epoch,
+            boot_ticks,
+            deep_sleep_fb,
+            deep_sleep_fb_buf,
+        )
     else:
         # No captive portal: USB is the configuration path. Keep retrying on
         # subsequent resets/deep-sleep wakes and never silently look current.

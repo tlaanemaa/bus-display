@@ -142,6 +142,104 @@ class _WLAN:
         pass
 
 
+def test_allocate_framebuffer_constructs_one_48000_byte_framebuffer(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    constructed = []
+    framebuffer = object()
+
+    monkeypatch.setattr(
+        main.framebuf,
+        "FrameBuffer",
+        lambda buf, width, height, mode: constructed.append(
+            (buf, width, height, mode)
+        ) or framebuffer,
+    )
+
+    fb, fb_buf = main._allocate_framebuffer()
+
+    assert fb is framebuffer
+    assert len(fb_buf) == 48_000
+    assert constructed == [
+        (
+            fb_buf,
+            main._FB_WIDTH,
+            main._FB_HEIGHT,
+            main.framebuf.MONO_HLSB,
+        ),
+    ]
+
+
+def test_deep_sleep_boot_allocates_before_rtc_wifi_ntp_and_reuses_objects(
+    monkeypatch,
+):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    events = []
+    framebuffer = object()
+    framebuffer_bytes = bytearray(1)
+    cycle_args = []
+
+    monkeypatch.setattr(
+        main.settings,
+        "load",
+        lambda: events.append("settings") or cfg,
+    )
+    monkeypatch.setattr(
+        main.config,
+        "load",
+        lambda: events.append("config")
+        or {"wifi": {"ssid": "test", "password": "secret"}},
+    )
+    monkeypatch.setattr(
+        main,
+        "_allocate_framebuffer",
+        lambda: events.append("allocate")
+        or (framebuffer, framebuffer_bytes),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_state_load",
+        lambda _cfg: events.append("rtc") or None,
+    )
+    monkeypatch.setattr(
+        main.wifi,
+        "connect_sta",
+        lambda _ssid, _password: events.append("wifi") or True,
+    )
+    monkeypatch.setattr(
+        main.ntptime,
+        "settime",
+        lambda: events.append("ntp"),
+    )
+    monkeypatch.setattr(main.time, "ticks_ms", lambda: 0, raising=False)
+    monkeypatch.setattr(main.time, "time", lambda: 120)
+    monkeypatch.setattr(
+        main.wake_schedule,
+        "request_boundary",
+        lambda _now, _interval: 180,
+    )
+
+    async def cycle_stub(*args):
+        events.append("cycle")
+        cycle_args.append(args)
+
+    monkeypatch.setattr(main, "deep_sleep_cycle", cycle_stub)
+
+    asyncio.run(main.main())
+
+    assert events == [
+        "settings",
+        "config",
+        "allocate",
+        "rtc",
+        "wifi",
+        "ntp",
+        "cycle",
+    ]
+    assert cycle_args[0][-2:] == (framebuffer, framebuffer_bytes)
+
+
 def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
     saved = []
     refreshes = []
@@ -371,7 +469,11 @@ def test_deep_sleep_policy_does_not_reuse_a_reconfigured_stop_by_position(monkey
     saved, refreshes = _prepare_deep_sleep_test(monkeypatch, main, 200)
     monkeypatch.setattr(main, "_fetch_all_stops", lambda *_args, **_kwargs: [None])
 
-    asyncio.run(main.deep_sleep_cycle(cfg, None, True, previous, 200, 0))
+    asyncio.run(
+        main.deep_sleep_cycle(
+            cfg, None, True, previous, 200, 0, object(), bytearray()
+        )
+    )
 
     assert saved[0]["frame"]["sections"][0]["dest"] == "No departures"
     assert saved[0]["frame"]["sections"][0]["stale"] is True
@@ -410,7 +512,11 @@ def test_deep_sleep_weather_future_timestamp_forces_an_adapter_attempt(monkeypat
     monkeypatch.setattr(main.openmeteo, "fetch_today", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(main.weather, "parse_weather", lambda _raw: fetched)
 
-    asyncio.run(main.deep_sleep_cycle(cfg, None, True, previous, 100, 0))
+    asyncio.run(
+        main.deep_sleep_cycle(
+            cfg, None, True, previous, 100, 0, object(), bytearray()
+        )
+    )
 
     assert saved[0]["weather"] == fetched
     assert saved[0]["weather_time"] == 100
@@ -461,7 +567,11 @@ def test_changed_deep_sleep_applies_encode_invalidate_refresh_commit_order(monke
         ),
     )
 
-    asyncio.run(main.deep_sleep_cycle(cfg, None, False, previous, 200, 0))
+    asyncio.run(
+        main.deep_sleep_cycle(
+            cfg, None, False, previous, 200, 0, object(), bytearray()
+        )
+    )
 
     assert events == [
         ("encode", proposed),
@@ -522,7 +632,11 @@ def test_unchanged_deep_sleep_commits_without_invalidation_or_panel(monkeypatch)
         ),
     )
 
-    asyncio.run(main.deep_sleep_cycle(cfg, None, False, previous, 200, 0))
+    asyncio.run(
+        main.deep_sleep_cycle(
+            cfg, None, False, previous, 200, 0, object(), bytearray()
+        )
+    )
 
     assert events == [
         ("encode", proposed),
@@ -576,7 +690,9 @@ def test_encode_failure_does_not_construct_epd_or_touch_rtc(monkeypatch):
 
     with pytest.raises(ValueError, match="oversize"):
         asyncio.run(
-            main.deep_sleep_cycle(cfg, None, False, previous, 200, 0)
+            main.deep_sleep_cycle(
+                cfg, None, False, previous, 200, 0, object(), bytearray()
+            )
         )
 
     assert events == ["encode"]
