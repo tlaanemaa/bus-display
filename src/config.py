@@ -1,28 +1,36 @@
-"""Load/save the on-device /config.json.
-
-An absent file just means "not configured yet" -- Wi-Fi credentials never
-exist anywhere but this file on the device (see AGENTS.md). This is
-deliberately Wi-Fi-only: stop ids/direction/refresh settings live in
-/settings.json instead (see settings.py) -- both are runtime JSON, not
-code, but kept as two separate files since only settings.json needs to be
-gitignored (see AGENTS.md "Departures logic & stops").
-"""
+"""Load validated Wi-Fi credentials from the on-device configuration."""
 import json
 
 if False:
-    from typing import Any
+    from models import WifiConfig
 
 PATH = "/config.json"
 
 
-def load() -> "dict[str, Any]":
+class ConfigError(ValueError):
+    """The on-device Wi-Fi configuration is malformed."""
+
+
+def load() -> "WifiConfig | None":
     try:
         with open(PATH) as f:
-            return json.load(f)
+            raw = json.load(f)
     except OSError:
-        return {}
+        return None
+    except ValueError as exc:
+        raise ConfigError("config.json is not valid JSON: %s" % exc)
 
-
-def save(config: "dict[str, Any]") -> None:
-    with open(PATH, "w") as f:
-        json.dump(config, f)
+    if not isinstance(raw, dict):
+        raise ConfigError("config.json must be an object")
+    if "wifi" not in raw or raw["wifi"] is None:
+        return None
+    wifi = raw["wifi"]
+    if not isinstance(wifi, dict):
+        raise ConfigError("wifi must be an object")
+    ssid = wifi.get("ssid")
+    password = wifi.get("password")
+    if not isinstance(ssid, str):
+        raise ConfigError("wifi.ssid must be a string")
+    if not isinstance(password, str):
+        raise ConfigError("wifi.password must be a string")
+    return {"ssid": ssid, "password": password}
