@@ -26,11 +26,6 @@ eggs/
 .eggs/
 lib/
 lib64/
-# src/lib/ is vendored third-party code (Microdot, writer.py, fonts) --
-# it must be committed, not ignored. The generic lib/ rule above is a
-# venv-oriented leftover from the standard Python template.
-!src/lib/
-!src/lib/**
 parts/
 sdist/
 var/
@@ -240,7 +235,6 @@ __marimo__/
 # -- see AGENTS.md "RAM-vs-HTTPS conflict"). The .py is the source of truth, so
 # the .mpy are not committed -- they'd only go stale and add diff noise.
 src/*.mpy
-src/lib/*.mpy
 
 # Host-generated preview renders (tools/preview_*.py output) -- regenerate on demand.
 tools/_preview_*.png

@@ -1,7 +1,6 @@
 [tool.mypy]
 python_version = "3.12"
 files = ["src"]
-exclude = ["src[\\\\/]lib[\\\\/]"]
 mypy_path = ["typings"]
 disallow_untyped_defs = true
 check_untyped_defs = true
@@ -13,7 +12,3 @@ warn_unused_ignores = true
 warn_unreachable = false
 strict_equality = true
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["lib.microdot"]
-follow_imports = "skip"

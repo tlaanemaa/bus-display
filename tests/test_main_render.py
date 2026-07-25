@@ -1,6 +1,5 @@
 """Isolated host tests for main.py's post-refresh serial corroboration."""
 import builtins
-import asyncio
 import sys
 import types
 from pathlib import Path
@@ -37,7 +36,7 @@ def _load_main_without_boot(monkeypatch):
     monkeypatch.setitem(sys.modules, "requests", requests)
 
     source = Path("src/main.py").read_text(encoding="utf-8")
-    source = source.split("\ntry:\n    asyncio.run(main())", 1)[0]
+    source = source.split("\ntry:\n    main()", 1)[0]
     module = types.ModuleType("main_render_test")
     module.__file__ = "src/main.py"
     exec(compile(source, "src/main.py", "exec"), module.__dict__)
@@ -98,10 +97,8 @@ def _cfg():
         "direction_code": 2,
         "forecast_min": 180,
         "departures_per_stop": 3,
-        "data_pull_interval_min": 1,
-        "render_interval_min": 1,
         "full_refresh_interval_min": 60,
-        "power": {"deep_sleep": True, "wake_advance_s": 3},
+        "power": {"wake_advance_s": 3},
         "weather": None,
     }
 
@@ -188,7 +185,7 @@ def test_deep_sleep_boot_allocates_before_rtc_wifi_ntp_and_reuses_objects(
         main.config,
         "load",
         lambda: events.append("config")
-        or {"wifi": {"ssid": "test", "password": "secret"}},
+        or {"ssid": "test", "password": "secret"},
     )
     monkeypatch.setattr(
         main,
@@ -220,13 +217,14 @@ def test_deep_sleep_boot_allocates_before_rtc_wifi_ntp_and_reuses_objects(
         lambda _now, _interval: 180,
     )
 
-    async def cycle_stub(*args):
+    def cycle_stub(*args):
         events.append("cycle")
         cycle_args.append(args)
+        return 57
 
     monkeypatch.setattr(main, "deep_sleep_cycle", cycle_stub)
 
-    asyncio.run(main.main())
+    main.main()
 
     assert events == [
         "settings",
@@ -244,7 +242,7 @@ def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
     saved = []
     refreshes = []
 
-    async def no_wait(_wdt, _target):
+    def no_wait(_wdt, _target):
         pass
 
     monkeypatch.setattr(main, "EPD7in5V2", lambda: _EPD())
@@ -309,17 +307,14 @@ def test_deep_sleep_cycle_reuses_supplied_framebuffer_without_allocating(
     monkeypatch.setattr(main, "bytearray", reject_full_buffer, raising=False)
     monkeypatch.setattr(main, "_draw_and_refresh", draw)
 
-    asyncio.run(
-        main.deep_sleep_cycle(
-            cfg,
-            None,
-            False,
-            previous,
-            200,
-            0,
-            supplied_fb,
-            supplied_buf,
-        )
+    main.deep_sleep_cycle(
+        cfg,
+        False,
+        previous,
+        200,
+        0,
+        supplied_fb,
+        supplied_buf,
     )
 
     assert len(refresh_args) == 1
@@ -517,10 +512,8 @@ def test_deep_sleep_policy_does_not_reuse_a_reconfigured_stop_by_position(monkey
     saved, refreshes = _prepare_deep_sleep_test(monkeypatch, main, 200)
     monkeypatch.setattr(main, "_fetch_all_stops", lambda *_args, **_kwargs: [None])
 
-    asyncio.run(
-        main.deep_sleep_cycle(
-            cfg, None, True, previous, 200, 0, object(), bytearray()
-        )
+    main.deep_sleep_cycle(
+        cfg, True, previous, 200, 0, object(), bytearray()
     )
 
     assert saved[0]["frame"]["sections"][0]["dest"] == "No departures"
@@ -560,10 +553,8 @@ def test_deep_sleep_weather_future_timestamp_forces_an_adapter_attempt(monkeypat
     monkeypatch.setattr(main.openmeteo, "fetch_today", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(main.weather, "parse_weather", lambda _raw: fetched)
 
-    asyncio.run(
-        main.deep_sleep_cycle(
-            cfg, None, True, previous, 100, 0, object(), bytearray()
-        )
+    main.deep_sleep_cycle(
+        cfg, True, previous, 100, 0, object(), bytearray()
     )
 
     assert saved[0]["weather"] == fetched
@@ -615,10 +606,8 @@ def test_changed_deep_sleep_applies_encode_invalidate_refresh_commit_order(monke
         ),
     )
 
-    asyncio.run(
-        main.deep_sleep_cycle(
-            cfg, None, False, previous, 200, 0, object(), bytearray()
-        )
+    main.deep_sleep_cycle(
+        cfg, False, previous, 200, 0, object(), bytearray()
     )
 
     assert events == [
@@ -680,10 +669,8 @@ def test_unchanged_deep_sleep_commits_without_invalidation_or_panel(monkeypatch)
         ),
     )
 
-    asyncio.run(
-        main.deep_sleep_cycle(
-            cfg, None, False, previous, 200, 0, object(), bytearray()
-        )
+    main.deep_sleep_cycle(
+        cfg, False, previous, 200, 0, object(), bytearray()
     )
 
     assert events == [
@@ -737,10 +724,8 @@ def test_encode_failure_does_not_construct_epd_or_touch_rtc(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="oversize"):
-        asyncio.run(
-            main.deep_sleep_cycle(
-                cfg, None, False, previous, 200, 0, object(), bytearray()
-            )
+        main.deep_sleep_cycle(
+            cfg, False, previous, 200, 0, object(), bytearray()
         )
 
     assert events == ["encode"]
@@ -750,9 +735,9 @@ def test_successful_refresh_logs_only_the_new_frame(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     draws = []
     printed = []
-    new_frame = ([{"name": "new"}], ["footer"], {"kind": "none"})
-    old_frame = ([{"name": "old"}], ["footer"], {"kind": "none"})
-    monkeypatch.setattr(main.display, "draw_home", lambda _fb, *frame: draws.append(frame))
+    new_frame = {"sections": [{"name": "new"}], "footer": ["footer"], "status": {"kind": "none"}}
+    old_frame = {"sections": [{"name": "old"}], "footer": ["footer"], "status": {"kind": "none"}}
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, frame: draws.append(frame))
     monkeypatch.setattr(main.display, "frame_summary", lambda frame: "summary:" + frame["sections"][0]["name"])
     monkeypatch.setattr(builtins, "print", lambda text: printed.append(text))
 
@@ -790,8 +775,8 @@ def test_successful_refresh_accepts_explicit_display_frame(monkeypatch):
 def test_failed_refresh_does_not_log_a_success_summary(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     printed = []
-    frame = ([{"name": "new"}], ["footer"], {"kind": "none"})
-    monkeypatch.setattr(main.display, "draw_home", lambda _fb, *_frame: None)
+    frame = {"sections": [{"name": "new"}], "footer": ["footer"], "status": {"kind": "none"}}
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, _frame: None)
     monkeypatch.setattr(main.display, "frame_summary", lambda _frame: "summary:new")
     monkeypatch.setattr(builtins, "print", lambda text: printed.append(text))
 
@@ -804,9 +789,9 @@ def test_failed_refresh_does_not_log_a_success_summary(monkeypatch):
 def test_successful_partial_sends_old_then_new_and_logs_only_new(monkeypatch):
     main = _load_main_without_boot(monkeypatch)
     events = []
-    new_frame = ([{"name": "new"}], ["footer"], {"kind": "none"})
-    old_frame = ([{"name": "old"}], ["footer"], {"kind": "none"})
-    monkeypatch.setattr(main.display, "draw_home", lambda _fb, *frame: events.append("draw:" + frame[0][0]["name"]))
+    new_frame = {"sections": [{"name": "new"}], "footer": ["footer"], "status": {"kind": "none"}}
+    old_frame = {"sections": [{"name": "old"}], "footer": ["footer"], "status": {"kind": "none"}}
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, frame: events.append("draw:" + frame["sections"][0]["name"]))
     monkeypatch.setattr(main.display, "frame_summary", lambda frame: "summary:" + frame["sections"][0]["name"])
     monkeypatch.setattr(builtins, "print", lambda text: events.append("print:" + text))
 
@@ -864,9 +849,9 @@ def test_successful_partial_accepts_explicit_display_frames(monkeypatch):
 def test_failed_partial_plane_never_logs_a_success_summary(monkeypatch, partial_fail, expected_events):
     main = _load_main_without_boot(monkeypatch)
     events = []
-    new_frame = ([{"name": "new"}], ["footer"], {"kind": "none"})
-    old_frame = ([{"name": "old"}], ["footer"], {"kind": "none"})
-    monkeypatch.setattr(main.display, "draw_home", lambda _fb, *frame: events.append("draw:" + frame[0][0]["name"]))
+    new_frame = {"sections": [{"name": "new"}], "footer": ["footer"], "status": {"kind": "none"}}
+    old_frame = {"sections": [{"name": "old"}], "footer": ["footer"], "status": {"kind": "none"}}
+    monkeypatch.setattr(main.display, "draw_home", lambda _fb, frame: events.append("draw:" + frame["sections"][0]["name"]))
     monkeypatch.setattr(main.display, "frame_summary", lambda _frame: "summary:new")
     monkeypatch.setattr(builtins, "print", lambda text: events.append("print:" + text))
 

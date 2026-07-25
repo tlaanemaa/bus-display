@@ -13,10 +13,8 @@ def _settings(site_id=9192, weather_cfg=None):
         "direction_code": 2,
         "forecast_min": 180,
         "departures_per_stop": 3,
-        "data_pull_interval_min": 1,
-        "render_interval_min": 1,
         "full_refresh_interval_min": 60,
-        "power": {"deep_sleep": True, "wake_advance_s": 3},
+        "power": {"wake_advance_s": 3},
         "weather": weather_cfg,
     }
 

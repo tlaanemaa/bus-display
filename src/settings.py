@@ -8,10 +8,10 @@ PATH = "/settings.json"
 
 _TOP_LEVEL_KEYS = {
     "stops", "direction_code", "forecast_min", "departures_per_stop",
-    "data_pull_interval_min", "render_interval_min", "full_refresh_interval_min",
+    "full_refresh_interval_min",
     "power", "weather",
 }
-_POWER_KEYS = {"deep_sleep", "wake_advance_s"}
+_POWER_KEYS = {"wake_advance_s"}
 _WEATHER_KEYS = {
     "enabled", "latitude", "longitude", "pull_interval_min", "max_age_min",
 }
@@ -154,14 +154,6 @@ def validate(raw: object) -> "Settings":
     _within(forecast_min, 1, 1200, "forecast_min")
     departures_per_stop = _optional_int(root, "departures_per_stop", 3, "departures_per_stop")
     _within(departures_per_stop, 1, 3, "departures_per_stop")
-    data_pull_interval_min = _optional_int(
-        root, "data_pull_interval_min", 1, "data_pull_interval_min")
-    if data_pull_interval_min <= 0:
-        raise SettingsError("data_pull_interval_min must be positive")
-    render_interval_min = _optional_int(
-        root, "render_interval_min", 1, "render_interval_min")
-    if render_interval_min <= 0:
-        raise SettingsError("render_interval_min must be positive")
     full_refresh_interval_min = _optional_int(
         root, "full_refresh_interval_min", 60, "full_refresh_interval_min")
     if full_refresh_interval_min <= 0:
@@ -169,9 +161,6 @@ def validate(raw: object) -> "Settings":
 
     power = _mapping(root.get("power", {}), "power")
     _check_keys(power, _POWER_KEYS, "power")
-    deep_sleep = _optional_bool(power, "deep_sleep", True, "power.deep_sleep")
-    if not deep_sleep:
-        raise SettingsError("power.deep_sleep must be true")
     wake_advance_s = _optional_int(power, "wake_advance_s", 3, "power.wake_advance_s")
     _within(wake_advance_s, 0, 59, "power.wake_advance_s")
 
@@ -180,10 +169,8 @@ def validate(raw: object) -> "Settings":
         "direction_code": direction_code,
         "forecast_min": forecast_min,
         "departures_per_stop": departures_per_stop,
-        "data_pull_interval_min": data_pull_interval_min,
-        "render_interval_min": render_interval_min,
         "full_refresh_interval_min": full_refresh_interval_min,
-        "power": {"deep_sleep": True, "wake_advance_s": wake_advance_s},
+        "power": {"wake_advance_s": wake_advance_s},
         "weather": _weather(root),
     }
 
