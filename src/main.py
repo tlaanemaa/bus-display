@@ -197,8 +197,8 @@ def _draw_and_refresh(
     because the heap fragments and MicroPython's GC never compacts. Allocating
     once, when the heap is cleanest, sidesteps that entirely.
 
-    `frame` is the screen content -- the tuple splatted into draw_home()
-    (sections, footer, weather). `prev_frame` is the previously-drawn frame,
+    `frame` is the screen content -- the temporary legacy tuple splatted into
+    draw_home() (sections, footer, status). `prev_frame` is the previously-drawn frame,
     needed as the differential partial's 0x10 old plane.
 
     `full` picks the refresh mode (see AGENTS.md "Screen refresh strategy"):
@@ -224,6 +224,7 @@ def _draw_and_refresh(
             epd.display(fb_buf)
         finally:
             _safe_sleep(epd)
+        print(display.frame_summary(display.make_frame(*frame)))
         return
 
     # Differential partial: old plane (0x10) first, then new plane (0x13).
@@ -239,6 +240,7 @@ def _draw_and_refresh(
         epd.partial_new(fb_buf)
     finally:
         _safe_sleep(epd)
+    print(display.frame_summary(display.make_frame(*frame)))
 
 
 async def _wait_until_epoch(wdt: "Any", target_epoch: int) -> None:
@@ -278,13 +280,14 @@ def _rtc_state_save(state: "dict[str, Any]") -> None:
 
 
 def _stale_section(
-    cfg_stop: "StopConfig", previous: "dict[str, Any] | None",
+    stop_key: str, cfg_stop: "StopConfig", previous: "dict[str, Any] | None",
 ) -> "Any":
     if previous:
         section = dict(previous)
+        section["stop_key"] = stop_key
         section["stale"] = True
         return section
-    return display.stop_section(cfg_stop["name"], [], stale=True)
+    return display.stop_section(stop_key, cfg_stop["name"], [], stale=True)
 
 
 async def deep_sleep_cycle(
@@ -328,12 +331,13 @@ async def deep_sleep_cycle(
 
     sections = []  # type: list[Any]
     for i, stop in enumerate(cfg["stops"]):
+        stop_key = "%s:%s" % (stop["site_id"], cfg["direction_code"])
         result = results[i]
         if result is not None:
-            sections.append(display.stop_section(stop["name"], result, stale=False))
+            sections.append(display.stop_section(stop_key, stop["name"], result, stale=False))
         else:
             old = previous_sections[i] if i < len(previous_sections) else None
-            sections.append(_stale_section(stop, old))
+            sections.append(_stale_section(stop_key, stop, old))
 
     weather_cfg = cfg.get("weather")
     weather_enabled = bool(weather_cfg and weather_cfg.get("enabled", True)
@@ -642,7 +646,8 @@ async def display_loop(
             await _sleep_until_next_tick(wdt, render_interval_s)
             continue
 
-        sections = [display.stop_section(stop["name"], deps, stale=sf)
+        sections = [display.stop_section("%s:%s" % (stop["site_id"], cfg["direction_code"]),
+                                         stop["name"], deps, stale=sf)
                     for stop, deps, sf in zip(cfg["stops"], last_good, stale_flags)]
         date_str, time_str = _local_now_strings()
         footer = display.footer_lines(date_str, time_str)
