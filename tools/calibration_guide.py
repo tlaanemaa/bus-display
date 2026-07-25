@@ -45,7 +45,6 @@ MARGIN_BOTTOM = 55 - _EXPAND - _EXPAND_HEIGHT_EACH
 
 buf = bytearray(WIDTH * HEIGHT // 8)
 physical = framebuf.FrameBuffer(buf, WIDTH, HEIGHT, framebuf.MONO_HLSB)
-physical.fill(0)
 
 
 def lpixel(lx, ly, c=1):
@@ -71,28 +70,35 @@ def ltext(s, lx, ly, c=1):
                 lpixel(lx + tx, ly + ty, c)
 
 
-# true buffer edge -- reference for "this is all the panel can draw, before
-# any frame cropping"
-physical.rect(0, 0, WIDTH, HEIGHT, 1)
+def draw_guide():
+    physical.fill(0)
+    # True buffer edge -- reference for "this is all the panel can draw,
+    # before any frame cropping".
+    physical.rect(0, 0, WIDTH, HEIGHT, 1)
 
-# candidate safe content rectangle
-safe_w = LW - MARGIN_LEFT - MARGIN_RIGHT
-safe_h = LH - MARGIN_TOP - MARGIN_BOTTOM
-lrect(MARGIN_LEFT, MARGIN_TOP, safe_w, safe_h, 1)
+    # Candidate safe content rectangle.
+    safe_w = LW - MARGIN_LEFT - MARGIN_RIGHT
+    safe_h = LH - MARGIN_TOP - MARGIN_BOTTOM
+    lrect(MARGIN_LEFT, MARGIN_TOP, safe_w, safe_h, 1)
 
-# label each side of the safe rect with the margin (px) used, just inside it
-ltext("L%d" % MARGIN_LEFT, MARGIN_LEFT + 4, MARGIN_TOP + 4, 1)
-ltext("T%d" % MARGIN_TOP, LW // 2 - 12, MARGIN_TOP + 4, 1)
-ltext("R%d" % MARGIN_RIGHT, LW - MARGIN_RIGHT - 28, MARGIN_TOP + 4, 1)
-ltext("B%d" % MARGIN_BOTTOM, LW // 2 - 12, LH - MARGIN_BOTTOM - 12, 1)
+    # Label each side of the safe rect with the margin (px) used, just inside it.
+    ltext("L%d" % MARGIN_LEFT, MARGIN_LEFT + 4, MARGIN_TOP + 4, 1)
+    ltext("T%d" % MARGIN_TOP, LW // 2 - 12, MARGIN_TOP + 4, 1)
+    ltext("R%d" % MARGIN_RIGHT, LW - MARGIN_RIGHT - 28, MARGIN_TOP + 4, 1)
+    ltext("B%d" % MARGIN_BOTTOM, LW // 2 - 12, LH - MARGIN_BOTTOM - 12, 1)
 
-print("calibration guide v2: safe rect margins L=%d T=%d R=%d B=%d "
-      "(logical px) inside a %dx%d canvas" %
-      (MARGIN_LEFT, MARGIN_TOP, MARGIN_RIGHT, MARGIN_BOTTOM, LW, LH))
+    print("calibration guide v2: safe rect margins L=%d T=%d R=%d B=%d "
+          "(logical px) inside a %dx%d canvas" %
+          (MARGIN_LEFT, MARGIN_TOP, MARGIN_RIGHT, MARGIN_BOTTOM, LW, LH))
 
 epd = EPD7in5V2()
-print("epd.init()"); epd.init()
-print("epd.clear()"); epd.clear()
-print("epd.display(buf)"); epd.display(buf)
-print("epd.sleep()"); epd.sleep()
+try:
+    print("epd.init()")
+    epd.init()
+    draw_guide()
+    print("epd.display()")
+    epd.display(buf)
+finally:
+    print("epd.sleep()")
+    epd.sleep()
 print("done")

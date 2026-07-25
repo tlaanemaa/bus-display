@@ -43,11 +43,18 @@ if not exist "%PY%" (
     goto :fail
 )
 set "MP=%PY% -m mpremote"
+set "MODULES=bitfont config cycle departures display epd7in5v2 localtime models openmeteo refresh_txn retained settings sl wake_schedule weather wifi"
 
 if not exist "%SRCDIR%\settings.json" (
     echo WARNING: %SRCDIR%\settings.json not found.
     echo          The device needs it to boot into the departures display.
     echo          Copy settings.example.json to settings.json and fill it in.
+    echo.
+)
+
+if not exist "%SRCDIR%\config.json" (
+    echo WARNING: %SRCDIR%\config.json not found.
+    echo          Existing device Wi-Fi credentials are preserved.
     echo.
 )
 
@@ -63,39 +70,42 @@ rem mpy-cross (pip install mpy-cross).
 rem
 rem main.py is the ONE exception -- MicroPython auto-runs :main.py by name (no
 rem main.mpy is ever run), so it ships as source and is compiled on-device.
-rem It's small; with everything else precompiled there's ample contiguous RAM.
-for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
-    if /I not "%%~nxF"=="main.py" (
-        echo   compile %%~nF.mpy
-        "%PY%" -m mpy_cross "%%F"
-        if errorlevel 1 (
-            echo ERROR: mpy-cross failed for %%~nxF -- is mpy-cross installed?  pip install mpy-cross
-            goto :fail
-        )
-    )
+rem The explicit list prevents deleted source from being copied back as a stale
+rem bytecode artifact.
+for %%M in (%MODULES%) do (
+    echo   compile %%M.mpy
+    "%PY%" -m mpy_cross "%SRCDIR%\%%M.py"
+    if errorlevel 1 goto :fail
 )
 
 echo Deploying to %PORTDESC% ...
 
-rem --- top-level files: main.py (source), the compiled modules, settings ---
-rem Only the .mpy go to the device -- NOT the .py (except main.py). Shipping
-rem the source too would be inert dead flash (MicroPython always prefers the
-rem .mpy) and just invites confusion about which one runs. settings.example.json
-rem is a repo-only template -- the device needs the real settings.json only.
-for %%F in ("%SRCDIR%\main.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
-    if /I not "%%~nxF"=="settings.example.json" (
-        echo   cp %%~nxF
-        %MP% %CONN% fs cp "%%F" ":%%~nxF"
-        if errorlevel 1 goto :fail
-    )
+rem --- retire files left by the old setup portal deployment -----------------
+rem Absence is normal, so cleanup is deliberately best-effort.
+%MP% %CONN% fs rm :server.mpy >nul 2>nul
+%MP% %CONN% fs rm :lib/microdot.mpy >nul 2>nul
+%MP% %CONN% fs rmdir :lib >nul 2>nul
+
+rem --- top-level files: main.py (source), explicit bytecode, local config ---
+echo   cp main.py
+%MP% %CONN% fs cp "%SRCDIR%\main.py" :main.py
+if errorlevel 1 goto :fail
+
+for %%M in (%MODULES%) do (
+    echo   cp %%M.mpy
+    %MP% %CONN% fs cp "%SRCDIR%\%%M.mpy" :%%M.mpy
+    if errorlevel 1 goto :fail
 )
 
-rem --- vendored libraries (src\lib\ -> :lib) --------------------------------
-rem Compiled above alongside our own modules; only the .mpy ships.
-%MP% %CONN% fs mkdir :lib >nul 2>nul
-for %%F in ("%SRCDIR%\lib\*.mpy") do (
-    echo   cp lib/%%~nxF
-    %MP% %CONN% fs cp "%%F" ":lib/%%~nxF"
+if exist "%SRCDIR%\settings.json" (
+    echo   cp settings.json
+    %MP% %CONN% fs cp "%SRCDIR%\settings.json" :settings.json
+    if errorlevel 1 goto :fail
+)
+
+if exist "%SRCDIR%\config.json" (
+    echo   cp config.json
+    %MP% %CONN% fs cp "%SRCDIR%\config.json" :config.json
     if errorlevel 1 goto :fail
 )
 

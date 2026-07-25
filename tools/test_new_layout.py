@@ -32,19 +32,22 @@ def main():
     print("free before fb:", gc.mem_free())
 
     sections = [
-        display.stop_section("Mölnvik", departures.parse_departures(RAW_1)),
-        display.stop_section("Grisslinge", departures.parse_departures(RAW_2)),
+        display.stop_section("1:2", "Molnvik", departures.parse_departures(RAW_1)),
+        display.stop_section("2:2", "Grisslinge", departures.parse_departures(RAW_2)),
     ]
     footer = display.footer_lines("Fre 10 jul", "14:32")
+    frame = display.make_frame(sections, footer, display.make_status("none"))
 
     buf = bytearray(display.PHYS_W * display.PHYS_H // 8)
     fb = framebuf.FrameBuffer(buf, display.PHYS_W, display.PHYS_H, framebuf.MONO_HLSB)
-    display.draw_home(fb, sections, footer)
 
     epd = EPD7in5V2()
-    epd.init()
-    epd.display(buf)
-    epd.sleep()
+    try:
+        epd.init()
+        display.draw_home(fb, frame)
+        epd.display(buf)
+    finally:
+        epd.sleep()
     print("test_new_layout: refreshed + panel asleep")
 
 
