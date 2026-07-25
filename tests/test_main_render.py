@@ -165,11 +165,12 @@ def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
             (frame, old, full)
         ),
     )
-    monkeypatch.setattr(
-        main,
-        "_rtc_state_save",
-        lambda state, _cfg: saved.append(state),
-    )
+    monkeypatch.setattr(main, "_rtc_invalidate", lambda: None)
+
+    def commit(raw, fingerprint, stop_keys):
+        saved.append(main.retained.decode(raw, fingerprint, stop_keys))
+
+    monkeypatch.setattr(main, "_rtc_commit", commit)
     monkeypatch.setattr(
         main.wake_schedule,
         "next_wake_delay_s",
@@ -216,6 +217,64 @@ def test_rtc_save_verifies_using_current_compatibility_context(monkeypatch):
         main.retained.settings_fingerprint(cfg),
         ["9192:2"],
     ) == expected
+
+
+def test_rtc_invalidate_writes_empty_bytes_and_verifies_readback(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    events = []
+
+    class RTC:
+        raw = b"old"
+
+        def memory(self, raw=None):
+            if raw is not None:
+                events.append(("write", raw))
+                self.raw = raw
+            events.append(("read", self.raw))
+            return self.raw
+
+    monkeypatch.setattr(main.machine, "RTC", lambda: RTC())
+
+    main._rtc_invalidate()
+
+    assert events == [("write", b""), ("read", b""), ("read", b"")]
+
+
+def test_rtc_invalidate_failure_stops_at_unverified_empty_write(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+
+    class RTC:
+        def memory(self, raw=None):
+            return b"stale"
+
+    monkeypatch.setattr(main.machine, "RTC", lambda: RTC())
+
+    with pytest.raises(OSError, match="RTC retained-state invalidation failed"):
+        main._rtc_invalidate()
+
+
+def test_rtc_commit_checks_exact_bytes_and_strict_decode_context(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    expected = _retained_state(main, cfg)
+    raw = main.retained.encode(expected)
+    rtc = _RTC()
+    monkeypatch.setattr(main.machine, "RTC", lambda: rtc)
+
+    main._rtc_commit(
+        raw,
+        main.retained.settings_fingerprint(cfg),
+        ["9192:2"],
+    )
+
+    assert rtc.raw == raw
+    with pytest.raises(OSError, match="RTC retained-state readback mismatch"):
+        main._rtc_commit(
+            raw,
+            main.retained.settings_fingerprint(cfg),
+            ["1321:2"],
+        )
+    assert rtc.raw == b""
 
 
 def test_deep_sleep_policy_does_not_reuse_a_reconfigured_stop_by_position(monkeypatch):
@@ -272,6 +331,114 @@ def test_deep_sleep_weather_future_timestamp_forces_an_adapter_attempt(monkeypat
 
     assert saved[0]["weather"] == fetched
     assert saved[0]["weather_time"] == 100
+
+
+def test_changed_deep_sleep_applies_encode_invalidate_refresh_commit_order(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    previous = _retained_state(main, cfg)
+    proposed = _retained_state(main, cfg)
+    proposed["frame"]["footer"] = ["Lor 25 jul 14:33"]
+    events = []
+    _prepare_deep_sleep_test(monkeypatch, main, 200)
+    monkeypatch.setattr(
+        main.cycle,
+        "decide",
+        lambda *_args: {
+            "frame": proposed["frame"],
+            "refresh": "partial",
+            "state": proposed,
+        },
+    )
+    monkeypatch.setattr(
+        main.retained,
+        "encode",
+        lambda state: events.append(("encode", state)) or b"encoded",
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_invalidate",
+        lambda: events.append("invalidate"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_draw_and_refresh",
+        lambda *_args, **_kwargs: events.append("refresh"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_commit",
+        lambda raw, fingerprint, stop_keys: events.append(
+            ("commit", raw, fingerprint, stop_keys)
+        ),
+    )
+
+    asyncio.run(main.deep_sleep_cycle(cfg, None, False, previous, 200, 0))
+
+    assert events == [
+        ("encode", proposed),
+        "invalidate",
+        "refresh",
+        (
+            "commit",
+            b"encoded",
+            main.retained.settings_fingerprint(cfg),
+            ["9192:2"],
+        ),
+    ]
+
+
+def test_unchanged_deep_sleep_commits_without_invalidation_or_panel(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    previous = _retained_state(main, cfg)
+    proposed = _retained_state(main, cfg)
+    proposed["last_ntp"] = 200
+    events = []
+    _prepare_deep_sleep_test(monkeypatch, main, 200)
+    monkeypatch.setattr(
+        main.cycle,
+        "decide",
+        lambda *_args: {
+            "frame": previous["frame"],
+            "refresh": "none",
+            "state": proposed,
+        },
+    )
+    monkeypatch.setattr(
+        main.retained,
+        "encode",
+        lambda state: events.append(("encode", state)) or b"encoded",
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_invalidate",
+        lambda: events.append("invalidate"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_draw_and_refresh",
+        lambda *_args, **_kwargs: events.append("refresh"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_rtc_commit",
+        lambda raw, fingerprint, stop_keys: events.append(
+            ("commit", raw, fingerprint, stop_keys)
+        ),
+    )
+
+    asyncio.run(main.deep_sleep_cycle(cfg, None, False, previous, 200, 0))
+
+    assert events == [
+        ("encode", proposed),
+        (
+            "commit",
+            b"encoded",
+            main.retained.settings_fingerprint(cfg),
+            ["9192:2"],
+        ),
+    ]
 
 
 def test_successful_refresh_logs_only_the_new_frame(monkeypatch):

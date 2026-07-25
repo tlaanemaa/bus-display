@@ -47,6 +47,7 @@ import openmeteo
 import weather
 import retained
 import cycle
+import refresh_txn
 import wake_schedule
 from epd7in5v2 import EPD7in5V2
 
@@ -274,12 +275,15 @@ def _retained_stop_keys(cfg: "Settings") -> "list[str]":
     ]
 
 
-def _rtc_state_load(cfg: "Settings") -> "RetainedState | None":
+def _rtc_load(
+    expected_fingerprint: str,
+    expected_stop_keys: "list[str]",
+) -> "RetainedState | None":
     raw = machine.RTC().memory()
     state = retained.decode(
         raw,
-        retained.settings_fingerprint(cfg),
-        _retained_stop_keys(cfg),
+        expected_fingerprint,
+        expected_stop_keys,
     )
     if state is None:
         reason = "empty" if not raw else "invalid/corrupt/incompatible"
@@ -289,9 +293,20 @@ def _rtc_state_load(cfg: "Settings") -> "RetainedState | None":
     return state
 
 
-def _rtc_state_save(state: "RetainedState", cfg: "Settings") -> None:
-    """Write and read back before sleeping; never silently trust retention."""
-    raw = retained.encode(state)
+def _rtc_invalidate() -> None:
+    """Clear retained bytes and prove the old frame is no longer trusted."""
+    rtc = machine.RTC()
+    rtc.memory(b"")
+    if rtc.memory() != b"":
+        raise OSError("RTC retained-state invalidation failed")
+
+
+def _rtc_commit(
+    raw: bytes,
+    expected_fingerprint: str,
+    expected_stop_keys: "list[str]",
+) -> None:
+    """Write exact encoded state and independently validate its readback."""
     rtc = machine.RTC()
     rtc.memory(raw)
     readback = rtc.memory()
@@ -301,11 +316,30 @@ def _rtc_state_save(state: "RetainedState", cfg: "Settings") -> None:
     # identical state would falsely fail an object-equality check.
     if readback != raw or retained.decode(
         readback,
-        retained.settings_fingerprint(cfg),
-        _retained_stop_keys(cfg),
+        expected_fingerprint,
+        expected_stop_keys,
     ) is None:
+        # A failed verification must never leave bytes that a later wake could
+        # mistake for the frame physically on the panel.
+        _rtc_invalidate()
         raise OSError("RTC retained-state readback mismatch")
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
+
+
+def _rtc_state_load(cfg: "Settings") -> "RetainedState | None":
+    return _rtc_load(
+        retained.settings_fingerprint(cfg),
+        _retained_stop_keys(cfg),
+    )
+
+
+def _rtc_state_save(state: "RetainedState", cfg: "Settings") -> None:
+    """Legacy wrapper for callers that do not own a refresh transaction."""
+    _rtc_commit(
+        retained.encode(state),
+        retained.settings_fingerprint(cfg),
+        _retained_stop_keys(cfg),
+    )
 
 
 async def deep_sleep_cycle(
@@ -393,20 +427,38 @@ async def deep_sleep_cycle(
         last_ntp_epoch,
     )
     refresh = decision["refresh"]
+    expected_fingerprint = retained.settings_fingerprint(cfg)
+    expected_stop_keys = _retained_stop_keys(cfg)
     if refresh != "none":
         print("power: content changed, %s refresh" % refresh)
-        _draw_and_refresh(
-            epd,
-            fb,
-            fb_buf,
-            decision["frame"],
-            previous_frame,
-            refresh == "full",
+
+        def refresh_panel() -> None:
+            _draw_and_refresh(
+                epd,
+                fb,
+                fb_buf,
+                decision["frame"],
+                previous_frame,
+                refresh == "full",
+            )
+
+        def commit_state(raw: bytes) -> None:
+            _rtc_commit(raw, expected_fingerprint, expected_stop_keys)
+
+        refresh_txn.apply(
+            decision["state"],
+            retained.encode,
+            _rtc_invalidate,
+            refresh_panel,
+            commit_state,
         )
     else:
         print("power: content unchanged -- no panel refresh")
-
-    _rtc_state_save(decision["state"], cfg)
+        _rtc_commit(
+            retained.encode(decision["state"]),
+            expected_fingerprint,
+            expected_stop_keys,
+        )
 
     advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
     delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)
