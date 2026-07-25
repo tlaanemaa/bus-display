@@ -1,36 +1,18 @@
-"""Streamed 1-bit bitmap font reader. Renders smooth, print-like text on
-the e-paper panel WITHOUT keeping the font resident in RAM -- the whole
-reason a nicer font is viable on this board at all.
+"""Streamed 1-bit Bitter font reader for the e-paper panel.
 
-Background (AGENTS.md "RAM-vs-HTTPS conflict"): peterhinch/font_to_py
-emits a Python module whose glyph data stays resident, and even a ~15KB
-resident font reliably crashed the live fetch/render loop allocating the
-48KB framebuffer (no PSRAM, fragmented heap; confirmed on hardware
-2026-07-11). This module instead keeps the font on flash (4MB, cheap)
-and reads ONE glyph at a time.
+Glyph data remains on flash and this module reads one glyph at a time, which
+keeps the single 48 KB framebuffer affordable on the PSRAM-less ESP32. A
+resident glyph module is not acceptable here.
 
-TWO RAM disciplines are load-bearing here, both learned the hard way on
-this PSRAM-less board where mbedtls's RSA-2048 SL handshake needs a large
-*contiguous* block that fragments away easily (AGENTS.md "RAM-vs-HTTPS
-conflict"):
+The draw path reuses module-level scratch storage. `warm()` is available to
+prepopulate advance widths when a caller needs it, while normal measurement
+fills missing widths on demand. Font files are opened only for the current
+measure/draw operation and then closed. The module ships as bytecode so the
+device does not compile it during boot.
 
-  1. Never hold a font file open across a fetch -- each measure()/draw()
-     opens and closes it. During the fetch, zero font files are open.
-
-  2. The draw path must not churn the heap. Every allocation made while
-     the 48KB framebuffer is alive can strand an object into the region
-     the next TLS handshake needs. So: one module-level scratch buffer
-     (`_GBUF`), pre-sized big enough for the largest glyph and reused via
-     readinto (no per-glyph bytes); callers pass a module-level plot
-     function + the fb (no per-call lambda closures). Warm the advance
-     caches once at boot (see warm() / display.warm_fonts) so nothing new
-     is allocated during a draw. Deployed as bitfont.mpy so importing it
-     doesn't compile-fragment the heap either (AGENTS.md gotchas).
-
-Pure enough to run under host pytest: only imports `struct`, opens a
-file, and draws through a caller-supplied `plot` callback -- no
-`framebuf`/`machine`/`network`. See tools/gen_font.py for the `.fnt`
-binary format; this reader is its exact counterpart.
+This is host-testable: it imports only `struct`, opens files, and draws through
+a supplied `plot` callback. `tools/gen_font.py` defines the matching `.fnt`
+format.
 """
 import struct
 
@@ -46,8 +28,7 @@ _MAGIC = b"BFN1"
 # One shared glyph-bitmap scratch, reused by every draw of every font.
 # Pre-sized (at import, on a clean boot heap) larger than the biggest
 # glyph any font here produces (hero digit ~= 10 row-bytes x 87 rows
-# ~= 870 B), so it NEVER grows mid-draw -- a mid-draw grow would strand a
-# buffer into the framebuffer region and starve the next TLS handshake.
+# ~= 870 B), so it never grows during a rendered frame.
 _GBUF = bytearray(1200)
 _IDXBUF = bytearray(_IDX_SIZE)  # reused for index-entry reads (no per-lookup bytes)
 
@@ -94,9 +75,7 @@ class Font:
         return None
 
     def warm(self, charset: str) -> None:
-        """Populate the advance cache for every char in `charset`, once,
-        at boot -- so later measure() calls on a live heap allocate
-        nothing (see module docstring point 2)."""
+        """Populate the advance cache for every char in `charset`."""
         f = open(self.path, "rb")
         try:
             for ch in charset:

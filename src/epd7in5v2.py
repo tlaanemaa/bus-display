@@ -236,11 +236,9 @@ class EPD7in5V2:
         the differential update below only drives pixels that actually
         changed. buf is the same MONO_HLSB layout as display()/partial_new.
 
-        POLARITY (one empirical unknown, confirm on hardware): this inverts
-        buf to match partial_new's 0x13 plane, which is confirmed legible
-        inverted on this panel. If changed pixels ghost/darken instead of
-        resolving cleanly, switch this to self._write_bulk(buf) (non-inverted)
-        -- that's the whole fix if the starting polarity is wrong."""
+        Hardware-confirmed polarity: the partial protocol inverts both planes
+        through _write_bulk_inverted(), matching the verified V2 controller
+        contract. Do not change this without new hardware validation."""
         if len(buf) != BUF_SIZE:
             raise ValueError("buffer must be %d bytes, got %d" % (BUF_SIZE, len(buf)))
         self._command(0x10)
@@ -248,8 +246,8 @@ class EPD7in5V2:
 
     def partial_new(self, buf: "bytes | bytearray | memoryview") -> None:
         """Send the new image as the 0x13 plane and trigger the partial
-        refresh. Call after partial_begin() and partial_old(). Inverted to
-        match the earlier working display_partial() polarity."""
+        refresh. Call after partial_begin() and partial_old(). The inverted
+        transfer is the hardware-confirmed V2 partial-refresh contract."""
         if len(buf) != BUF_SIZE:
             raise ValueError("buffer must be %d bytes, got %d" % (BUF_SIZE, len(buf)))
         self._command(0x13)

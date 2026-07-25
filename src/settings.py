@@ -1,4 +1,4 @@
-"""Load and validate the on-device departure-display settings."""
+"""Load and validate USB-provisioned departure-display settings."""
 import json
 
 if False:

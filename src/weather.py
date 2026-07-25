@@ -5,10 +5,9 @@ AGENTS.md "Testability rule"); openmeteo.py does the fetching.
 
 Why Open-Meteo and not SMHI (the obvious Swedish source): SMHI's point
 forecast returns the whole multi-day hourly series (100KB+), and parsing
-that on this PSRAM-less board reruns the RAM-vs-HTTPS fight the SL fetch
-already had to win (AGENTS.md "RAM-vs-HTTPS conflict"). Open-Meteo lets us
-request ONLY today's daily + hourly fields -> a couple KB. Keyless, same
-as SL.
+that on this PSRAM-less board is unnecessarily large. Open-Meteo lets us
+request only today's daily + hourly fields -> a couple KB. Keyless, same as
+SL.
 
 The condition strings returned here are exactly the keys display.py's
 _WEATHER_DRAWERS dispatches on -- keep the two in sync. Rain is split

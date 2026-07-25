@@ -5,19 +5,15 @@ can be tested on host without a `requests` import (AGENTS.md "Testability
 rule"). Mirrors sl.py deliberately -- one bounded request per call.
 
 Only today's daily + hourly fields are requested (forecast_days=1, so 24
-hourly rows), keeping the response a couple KB so the parse can't restart
-the RAM-vs-HTTPS fight the SL fetch already had to win (see weather.py
-header)."""
+hourly rows), keeping the response small on the PSRAM-less device."""
 import gc
 import requests
 
 if False:
     from typing import Any
 
-# Plain HTTP, like sl.py (verified http with no https redirect 2026-07-12):
-# skipping the TLS handshake avoids the mbedtls contiguous-RAM starvation
-# that plagues this board (see AGENTS.md "RAM-vs-HTTPS conflict"). Public
-# weather data, no key -- nothing to protect.
+# Plain HTTP, like sl.py: this is public, keyless weather data and the
+# endpoint serves HTTP directly. Keep the adapter bounded and small.
 BASE_URL = "http://api.open-meteo.com/v1/forecast"
 # weather_code and precip move to hourly (see weather.py header) so the
 # condition glyph can be a daytime-mode instead of Open-Meteo's daily

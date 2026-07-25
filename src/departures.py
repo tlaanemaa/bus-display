@@ -18,13 +18,12 @@ if False:
 
 
 def _to_ascii(s: str) -> str:
-    """framebuf's built-in font is ASCII-only; SL destination/stop names
-    routinely contain Swedish a/a/o with diacritics, which otherwise draw
-    as corrupted glyphs (confirmed on real hardware for "Eknäs"). Custom
-    fonts that would support these natively are RAM-unviable on this
-    board (see AGENTS.md "Key library choices" / "RAM-vs-HTTPS
-    conflict") -- transliterating to plain ASCII is the permanent fix,
-    not a stopgap."""
+    """Map unsupported Swedish glyphs to the deployed font charset.
+
+    The streamed Bitter files currently contain printable ASCII plus the
+    degree sign, so names with diacritics are transliterated before their
+    widths are measured and the frame is retained.
+    """
     for accented, plain in _ASCII_FALLBACK:
         s = s.replace(accented, plain)
     return s

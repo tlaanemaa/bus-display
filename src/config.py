@@ -1,4 +1,4 @@
-"""Load and validate USB-provisioned Wi-Fi credentials."""
+"""Load and validate USB-provisioned Wi-Fi credentials from /config.json."""
 import json
 
 if False:

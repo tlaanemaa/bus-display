@@ -10,13 +10,9 @@ import requests
 if False:
     from typing import Any
 
-# Plain HTTP, deliberately: SL serves this endpoint over http with no
-# redirect to https (verified 2026-07-12), and doing so SKIPS THE TLS
-# HANDSHAKE ENTIRELY -- which is the whole RAM-vs-HTTPS conflict on this
-# PSRAM-less board (mbedtls's RSA-2048 cert verification intermittently
-# ran out of contiguous heap and hung/failed the fetch; see AGENTS.md).
-# The data is public transit times with no key or credentials, so there's
-# nothing to protect by encrypting it.
+# Plain HTTP is deliberate: this is public, keyless transit data and the
+# endpoint serves HTTP directly. It keeps this bounded adapter small on the
+# PSRAM-less device; do not add an HTTPS transport without an explicit need.
 BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 
 def fetch_departures(
@@ -29,7 +25,7 @@ def fetch_departures(
     """Fetch one validated SL payload.
 
     timeout_s bounds the request; main.py keeps a stale per-stop result on a
-    failure and the next wake/tick makes the next attempt. direction is SL's
+    failure and the next wake makes the next attempt. direction is SL's
     direction_code (1 or 2) to filter server-side, keeping
     the response small (see AGENTS.md "SL Transport API" -- keep the JSON
     small on-device). None means both directions.

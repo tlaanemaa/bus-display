@@ -1,68 +1,75 @@
 # bus-display
 
-A DIY bus departure display: a Waveshare 7.5" e-paper panel driven by an ESP32 (Waveshare's "Universal e-Paper Driver Board"), running MicroPython, showing real-time bus departures from Stockholm's SL Transport API.
+A DIY Stockholm bus-departure display: a Waveshare 7.5-inch V2 e-paper panel
+on an ESP32 Universal e-Paper Driver Board, running MicroPython.
 
-## Status
+The firmware has one synchronous deep-sleep wake cycle. It validates local
+configuration, reserves its one framebuffer before any radio or RTC work,
+restores compatible semantic screen state, connects, waits for exactly `:00`,
+fetches each source once, updates the panel only when the rendered result
+changes, safely commits retained state, and sleeps until the next minute.
 
-- ✅ E-paper driver ported and confirmed working on hardware
-- ✅ Minute-aligned ESP32 deep sleep with retained differential-refresh state
-- ✅ Connects to USB-configured Wi-Fi and shows an explicit offline status if unavailable
-- ✅ Fetches and displays real-time departures for a configurable, ordered list of stops — each with its next departure shown big and centered, the following two smaller
-- ⬜ Polished onboarding — deliberately deferred; configuration currently uses local JSON over USB
+The panel shows clear Wi-Fi status when it cannot connect; the next wake tries
+again. Configuration is USB-only—there is no network provisioning mode.
 
 ## Hardware
 
-- [Waveshare 7.5" e-Paper V2](https://www.waveshare.com/7.5inch-e-paper.htm) (800×480, black/white)
-- [Waveshare Universal e-Paper Driver Board](https://www.waveshare.com/e-paper-esp32-driver-board.htm) (ESP32-WROOM-32, 4MB flash)
+- [Waveshare 7.5-inch e-Paper V2](https://www.waveshare.com/7.5inch-e-paper.htm)
+  (800x480, black/white)
+- [Waveshare Universal e-Paper Driver Board](https://www.waveshare.com/e-paper-esp32-driver-board.htm)
+  (ESP32-WROOM-32, 4 MB flash)
 
 ## Setup
 
-Install host tools:
+Install the host tools:
 
-```
+```text
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 ```
 
-Flash MicroPython (download `ESP32_GENERIC-<version>.bin` from [micropython.org/download/ESP32_GENERIC](https://micropython.org/download/ESP32_GENERIC/)):
+Flash MicroPython (download `ESP32_GENERIC-<version>.bin` from
+[micropython.org/download/ESP32_GENERIC](https://micropython.org/download/ESP32_GENERIC/)):
 
-```
+```text
 esptool --port COM3 erase-flash
 esptool --port COM3 --baud 460800 write-flash 0x1000 ESP32_GENERIC-<version>.bin
 ```
 
-Configure your stops and Wi-Fi (both local files are gitignored so private details cannot enter a public commit):
+Create the two private, gitignored configuration files:
 
-```
-cp src/settings.example.json src/settings.json
-# edit src/settings.json: your stop name(s) + SL site id(s) (find a site id via
-# `curl https://transport.integration.sl.se/v1/sites` on your host, not the device)
+```text
+Copy-Item src/settings.example.json src/settings.json
+# Edit src/settings.json with the stop name(s) and SL site id(s).
+# Find a site id on the host, never on the device:
+# curl http://transport.integration.sl.se/v1/sites
 
-# create src/config.json:
+# Create src/config.json:
 # {"wifi": {"ssid": "your-network", "password": "your-password"}}
 ```
 
-Deploy:
+Run the checks and deterministic USB deploy:
 
-```
+```text
+.venv\Scripts\python -m pytest
+.venv\Scripts\python -m mypy src
 deploy.bat COM3
 ```
 
-Run the host checks before deploying:
+`deploy.bat` precompiles the explicit firmware module set, removes retired
+device artifacts, and uploads `main.py`, bytecode, settings, Wi-Fi config,
+and streamed font files before resetting the board. Close any serial console
+first; only one process can hold the USB port.
 
-```
-.venv\Scripts\python -m mypy
-.venv\Scripts\python -m pytest
-```
+## Display and refresh behavior
 
-There is no setup access point. If Wi-Fi credentials are missing or the network is unavailable, the panel says so and retries on the next minute-aligned wake.
+The large, left-aligned Bitter countdown is the primary information for each
+configured stop. Smaller line/destination and following-departure rows give
+context. A stop with a failed request is marked `STALE` without obscuring the
+other stop. The footer puts weather on the left and local date/time on the
+right. A full refresh is used for the first compatible-state failure and at
+the configured ghost-clearing interval; normal changed minute updates are
+true differential partial refreshes using one semantic retained frame.
 
-## Repo layout
-
-```
-src/      device filesystem root (MicroPython code + vendored lib/)
-tests/    pytest, runs on host CPython
-tools/    host-side scripts (hardware bring-up, one-off experiments)
-```
-
-See [AGENTS.md](AGENTS.md) for hardware details, verified gotchas, and full architecture notes.
+See [AGENTS.md](AGENTS.md) for the verified hardware contract, retained-state
+compatibility rules, screen geometry, and maintenance guidance.

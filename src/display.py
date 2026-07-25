@@ -14,17 +14,13 @@ baseline, that departure's line + destination as an inverted route badge
 (like a real bus blind) + text, then its other departures as compact
 badge rows.
 
-Type: a real print-like face (Bitter, a slab serif) STREAMED from flash
-glyph-by-glyph via bitfont.py, at three fixed sizes -- hero (big
-countdown), head (labels / headline / the "min" unit) and row (secondary
-departures / footer). This replaced the old built-in-8x8-font-scaled-10x
-"Minecraft" look; the panel is 1-bit (no anti-aliasing) so smoothness
-comes purely from rendering each glyph at its true size. The earlier
-concern that a nicer font is RAM-unviable was specific to font_to_py's
-RESIDENT glyph module (AGENTS.md "RAM-vs-HTTPS conflict"); streaming from
-flash sidesteps it -- resident cost is ~one glyph, and the draw window
-never overlaps the TLS fetch. Font files live in fonts/ (device) /
-src/fonts/ (host); regenerate with tools/gen_font.py.
+Type: a real print-like face (Bitter, a slab serif) streamed from flash
+glyph-by-glyph via bitfont.py, at three fixed sizes -- hero (big countdown),
+head (labels / headline / the "min" unit), and row (secondary departures /
+footer). The panel is 1-bit (no anti-aliasing), so smoothness comes from
+rendering each glyph at its true size. Streaming avoids resident glyph data
+alongside the framebuffer. Font files live in fonts/ (device) / src/fonts/
+(host); regenerate with tools/gen_font.py.
 
 Fixed pixel sizes (not the old arbitrary fractional scale) mean vertical
 rhythm is expressed as gaps between font cell heights (font.height),
@@ -99,10 +95,8 @@ GAP_DROP_PRECIP = 6       # droplet -> its percentage
 GAP_WEATHER_DATE = 20     # minimum gap between the weather cluster and the date/time
 
 
-# --- fonts: streamed from flash, opened lazily on first use (never at
-# import -- keeps the eager-import RAM discipline, AGENTS.md). Cached so
-# the three files open once and stay open (fds are cheap; bitmap data is
-# never held resident -- that's bitfont's whole point).
+# --- fonts: streamed from flash and opened lazily on first use. Font objects
+# cache metadata and advance widths, while glyph bitmaps remain on flash.
 _FONTS = {}  # type: dict[str, bitfont.Font]
 _FONT_FILES = {"hero": "bitter_hero.fnt", "head": "bitter_head.fnt", "row": "bitter_row.fnt"}
 
@@ -124,16 +118,9 @@ def _fonts() -> "dict[str, bitfont.Font]":
 
 
 def warm_fonts() -> None:
-    """Open the fonts and fully populate their advance caches BEFORE the
-    fetch/render loop starts (main.py calls this once). On a clean boot
-    heap this is free; the point is that no font state then gets allocated
-    during a live draw -- which, while the 48KB framebuffer is alive,
-    would strand objects into the region the next SL TLS handshake needs
-    (AGENTS.md "RAM-vs-HTTPS conflict"; bitfont.py module docstring)."""
+    """Optionally populate known advance widths for all display strings."""
     f = _fonts()
-    # Printable ASCII + the degree sign (weather temps) -- any char measured
-    # or drawn without being warmed here would open the font file mid-draw,
-    # allocating into the live-framebuffer region (see bitfont.py docstring).
+    # Printable ASCII + the degree sign (weather temps).
     head_row = "".join(chr(c) for c in range(0x20, 0x7F)) + "°"
     f["head"].warm(head_row)
     f["row"].warm(head_row)
@@ -243,12 +230,11 @@ def _badge(
 # --- weather glyphs: small procedural 1-bit icons drawn straight through
 # the 90deg mount transform, ALLOCATION-FREE (integer math + the
 # module-level _plot_run only -- no tuples, floats, or closures per draw).
-# They run inside the live-framebuffer draw window, so they obey the same
-# no-heap-churn discipline as the streamed font path (see bitfont.py): any
-# object stranded while the 48KB buffer is alive can starve the next SL TLS
-# handshake. Condition strings match weather.py's constants (loose coupling
-# by string, kept in sync there). Each drawer fills a square (x, y, s, s)
-# logical box; s is tuned to sit on the footer next to the temperature.
+# They run inside the live-framebuffer draw window, so they avoid heap churn
+# like the streamed font path. Condition strings match weather.py's constants
+# (loose coupling by string, kept in sync there). Each drawer fills a square
+# (x, y, s, s) logical box; s is tuned to sit on the footer next to the
+# temperature.
 
 def _box(
     fb: "Any", lx: int, ly: int, lw: int, lh: int, color: int,
@@ -648,9 +634,8 @@ def draw_home(
     frame status selects the footer branch. Returns
     (content_bottom, footer_top) logical-y coordinates so callers/tests can
     check content didn't grow into the footer."""
-    # TEMPORARY Task 4 compatibility: current main.py still splats its old
-    # (sections, footer, status) tuple into this function. Remove once main.py
-    # constructs DisplayFrame values directly.
+    # The optional arguments retain a small test/helper compatibility surface;
+    # production passes the complete semantic frame.
     if footer is not None:
         frame_data = make_frame(frame, footer, status or make_status("none"))
     else:
