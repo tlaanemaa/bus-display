@@ -238,6 +238,46 @@ def test_deep_sleep_boot_allocates_before_rtc_wifi_ntp_and_reuses_objects(
     assert cycle_args[0][-3:] == (120, framebuffer, framebuffer_bytes)
 
 
+def test_retained_wake_recalculates_boundary_after_sta_connection(monkeypatch):
+    main = _load_main_without_boot(monkeypatch)
+    cfg = _cfg()
+    retained_state = _retained_state(main, cfg)
+    clock = [57]
+    cycle_args = []
+
+    monkeypatch.setattr(main.settings, "load", lambda: cfg)
+    monkeypatch.setattr(
+        main.config,
+        "load",
+        lambda: {"ssid": "test", "password": "secret"},
+    )
+    monkeypatch.setattr(main, "_allocate_framebuffer", lambda: (object(), bytearray()))
+    monkeypatch.setattr(main, "_rtc_state_load", lambda _cfg: retained_state)
+    monkeypatch.setattr(main.time, "ticks_ms", lambda: 0, raising=False)
+    monkeypatch.setattr(main.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        main.wifi,
+        "connect_sta",
+        lambda _ssid, _password: clock.__setitem__(0, 61) or True,
+    )
+    monkeypatch.setattr(
+        main.wake_schedule,
+        "request_boundary",
+        lambda now, _interval: ((int(now) // 60) + 1) * 60,
+    )
+    monkeypatch.setattr(
+        main,
+        "deep_sleep_cycle",
+        lambda *args: cycle_args.append(args) or 57,
+    )
+    monkeypatch.setattr(main, "_disable_wlan", lambda: None)
+    monkeypatch.setattr(main.machine, "deepsleep", lambda _ms: None)
+
+    main.main()
+
+    assert cycle_args[0][3] == 120
+
+
 def _prepare_deep_sleep_test(monkeypatch, main, now_epoch):
     saved = []
     refreshes = []

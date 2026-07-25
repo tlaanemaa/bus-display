@@ -288,7 +288,6 @@ def main() -> None:
     fb, fb_buf = _allocate_framebuffer()
     state = _rtc_state_load(cfg)
     last_ntp_epoch = state["last_ntp"] if state is not None else None
-    request_epoch = wake_schedule.request_boundary(time.time(), 60)
 
     connected = False
     if wifi_cfg is not None and wifi_cfg["ssid"]:
@@ -301,7 +300,8 @@ def main() -> None:
             print("main: cold-boot NTP sync ok")
         except Exception as exc:
             print("main: cold-boot NTP sync failed:", exc)
-        request_epoch = wake_schedule.request_boundary(time.time(), 60)
+
+    request_epoch = wake_schedule.request_boundary(time.time(), 60)
 
     print("main: wake advance = %d s" % cfg["power"]["wake_advance_s"])
     delay_s = deep_sleep_cycle(
