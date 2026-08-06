@@ -51,6 +51,12 @@ still has production reliability gaps:
 - Deployment copies the activating `main.py` before all supporting bytecode,
   leaving a mixed firmware if USB copying fails partway through.
 
+Hardware acceptance on 2026-08-06 later disproved the plan's initial
+framebuffer-before-radio remedy: reserving 48 KB first left only 4 of the 10
+expected Wi-Fi RX buffers, logged deinitialization error `0x3001`, and raised
+`OSError: WiFi Out of Memory`. The accepted deep-sleep boot order is therefore
+WDT -> Wi-Fi STA initialization -> one framebuffer -> RTC/NTP/API/render/EPD.
+
 The plain-HTTP SL and Open-Meteo endpoints were rechecked on 2026-08-06 with
 the production query shapes and returned directly without redirects. Their
 transport choice is not changed by this work.
@@ -87,10 +93,13 @@ Every boot prints `machine.reset_cause()` in a stable diagnostic line so
 serial logs distinguish power-on, deep-sleep, watchdog, and manual resets.
 
 For deep-sleep mode, configuration is loaded first so a malformed local file
-remains Ctrl-C recoverable. The framebuffer is then allocated before RTC,
-radio, NTP, or EPD setup. A single watchdog is started immediately afterward
-and passed through Wi-Fi connection, boundary waiting, API requests, NTP, and
-panel orchestration. The awake path keeps its existing watchdog ownership.
+remains Ctrl-C recoverable. A single watchdog is then started and passed into
+Wi-Fi connection so the STA driver can reserve its RX buffers on the clean
+heap. Exactly one framebuffer is allocated next, before RTC, NTP, API, render,
+or EPD work. This WDT -> Wi-Fi -> framebuffer order is hardware-confirmed; the
+earlier framebuffer-before-radio design was not viable on the ESP32-WROOM.
+The same watchdog covers boundary waiting, API requests, NTP, and panel
+orchestration. The awake path keeps its existing watchdog ownership.
 
 The EPD object is constructed only when a changed frame has already been
 encoded and the program is ready to refresh. This avoids fragmenting the heap
@@ -156,12 +165,14 @@ refresh. It never aborts boot.
 For changed content, the deep-sleep path performs this exact transaction:
 
 1. Build and encode the complete proposed next state, including the size check.
-2. Keep the validated previous semantic frame in ordinary RAM.
-3. Clear RTC memory and verify that it reads back empty.
-4. Construct the EPD object and perform the existing full or differential
+2. Strictly decode those candidate bytes with the current settings fingerprint
+   and section count. Abort without touching RTC or EPD if validation fails.
+3. Keep the validated previous semantic frame in ordinary RAM.
+4. Clear RTC memory and verify that it reads back empty.
+5. Construct the EPD object and perform the existing full or differential
    refresh under the panel sleep guard.
-5. Write the pre-encoded new retained state.
-6. Verify exact RTC bytes and strictly decode them in the current settings
+6. Write the pre-encoded new retained state.
+7. Verify exact RTC bytes and strictly decode them in the current settings
    context.
 
 If encoding fails, neither RTC nor panel is touched. If a reset or exception
@@ -190,7 +201,10 @@ and flow into the existing stale/error policy.
 
 Elapsed-time checks share the rule that a retained timestamp in the future is
 not fresh. It makes the associated work due immediately. This applies to
-weather pulls, daily NTP synchronization, and periodic full refreshes.
+weather pulls, daily NTP synchronization, and periodic full refreshes. Weather
+usability is checked on every wake; a forecast date mismatch (especially the
+first wake after midnight) makes a pull due immediately regardless of elapsed
+interval and cannot be displayed as current.
 
 Scheduling still uses the current wall-clock minute boundary after Wi-Fi and
 any cold-boot NTP synchronization. Wake delay remains clamped to a future
@@ -200,9 +214,9 @@ minute with the configured advance.
 
 Expected source failures produce screen state and continue normally.
 Unexpected exceptions in the deep-sleep path print a traceback, best-effort
-sleep any powered panel through the existing guard, invalidate RTC state, turn
-off WLAN, and call `machine.deepsleep(60_000)`. If that call unexpectedly
-returns, a hard reset is the fallback.
+turn off WLAN, invalidate RTC state, and call `machine.deepsleep(60_000)`.
+Any powered panel is already covered by the existing refresh `finally` guard.
+If deep sleep unexpectedly returns, `machine.reset()` is the fallback.
 
 Configuration errors retain the current USB-recoverable behavior rather than
 rebooting forever. Awake-mode fatal behavior is not changed by this project.
@@ -247,14 +261,17 @@ terminal failure, timeout, and watchdog feeding without importing hardware.
 
 A narrowly scoped fake MicroPython environment imports `main.py` and verifies:
 
-- framebuffer allocation precedes RTC, Wi-Fi, NTP, and EPD construction;
+- WDT construction and Wi-Fi STA initialization precede the framebuffer, which
+  in turn precedes RTC, NTP, API, render, and EPD work;
 - the same framebuffer is reused for old and new planes;
-- changed refresh order is encode, RTC invalidate, panel refresh, RTC commit;
+- changed refresh order is encode, strict candidate decode, RTC invalidate,
+  panel refresh, RTC commit;
 - encode/invalidation/refresh/commit failures cannot leave a falsely usable
   retained frame;
 - unchanged content does not touch the panel;
-- Wi-Fi failure renders an honest state and schedules another wake;
-- deep-sleep runtime failure invalidates state and requests a 60-second sleep;
+- missing/unavailable Wi-Fi renders an honest state and schedules another wake;
+- deep-sleep runtime failure disables STA, invalidates state, requests a
+  60-second sleep, and resets if that call returns;
 - reset cause is logged;
 - full refresh is selected for absent or incompatible state and for a retained
   last-full timestamp in the future; partial refresh is selected only for a

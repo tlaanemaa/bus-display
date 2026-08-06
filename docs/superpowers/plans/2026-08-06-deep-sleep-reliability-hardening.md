@@ -4,7 +4,12 @@
 
 **Goal:** Harden the existing `main` deep-sleep path so every validly configured wake either presents honest current/error state and schedules the next wake, or enters bounded automatic recovery without risking an invalid differential refresh.
 
-**Architecture:** Preserve the current dual-mode `main.py`, display representation, configuration format, and EPD driver. Add validation at existing boundaries, make RTC persistence transactional around changed panel frames, move framebuffer/watchdog setup earlier in only the deep-sleep path, and keep all expected network failures inside the current stale/error display policy.
+**Architecture:** Preserve the current dual-mode `main.py`, display representation, configuration format, and EPD driver. Add validation at existing boundaries, make RTC persistence transactional around changed panel frames, establish the hardware-confirmed WDT -> Wi-Fi -> framebuffer setup order only in the deep-sleep path, and keep all expected network failures inside the current stale/error display policy.
+
+> Hardware correction (2026-08-06): the initial plan below placed the
+> framebuffer before Wi-Fi. COM3 disproved that order: it left 4/10 expected RX
+> buffers, logged `0x3001`, and raised `WiFi Out of Memory`. The implemented and
+> regression-tested order is WDT -> Wi-Fi STA -> framebuffer -> RTC/NTP/API/EPD.
 
 **Tech Stack:** MicroPython v1.28.0 on ESP32_GENERIC, CPython 3.12 host tests with pytest, mypy, `mpy-cross`, Windows `deploy.bat`, and `mpremote` on COM3.
 
@@ -409,7 +414,7 @@ git commit -m "fix: make network failures explicit"
 - Produces `wake_schedule.elapsed_due(now_s: float, previous_s: float | None, interval_s: int) -> bool`.
 - Produces `_allocate_framebuffer() -> tuple[bytearray, Any]`.
 - Produces `_rtc_state_invalidate() -> None` and `_rtc_state_commit(raw, cfg) -> None`.
-- Extends `deep_sleep_cycle(..., wdt, fb, fb_buf) -> None` to reuse boot-owned resources.
+- Extends `deep_sleep_cycle(..., wdt, fb, fb_buf, cold_ntp_epoch=None) -> None` to reuse boot-owned resources and carry a successful cold sync into state.
 - Produces `_recover_deep_sleep(exc) -> None` for bounded 60-second recovery.
 - Keeps awake-mode `display_loop()` behavior and signatures unchanged.
 
@@ -474,10 +479,12 @@ def test_unchanged_frame_commits_without_constructing_panel(app):
     assert "rtc-commit" in app.events
 
 
-def test_deep_sleep_boot_reserves_buffer_before_rtc_wifi_ntp_or_epd(app):
+def test_deep_sleep_boot_starts_wifi_before_reserving_framebuffer(app):
     app.run_main_once()
     allocation = app.events.index("framebuffer")
-    for later in ("rtc-read", "wifi-connect", "ntp", "epd-construct"):
+    assert app.events.index("wdt-construct") < app.events.index("wifi-connect")
+    assert app.events.index("wifi-connect") < allocation
+    for later in ("rtc-read", "ntp", "epd-construct"):
         assert allocation < app.events.index(later)
 
 
@@ -508,24 +515,41 @@ Add `elapsed_due`; make `weather.keep_last_good` require `0 <= age_s <=
 max_age_s`. In deep-sleep mode only:
 
 1. validate config;
-2. allocate `fb_buf`/`fb`;
-3. start one WDT;
-4. load strict RTC state;
-5. call `wifi.connect_sta(..., wdt=wdt)`;
+2. start one WDT;
+3. call `wifi.connect_sta(..., wdt=wdt)` so STA reserves RX buffers first;
+4. allocate exactly one `fb_buf`/`fb`;
+5. load strict RTC state;
 6. cold-sync NTP under WDT;
 7. recalculate the request boundary;
-8. call `deep_sleep_cycle` with the owned WDT/framebuffer.
+8. call `deep_sleep_cycle` with the owned WDT/framebuffer and successful cold
+   NTP epoch, if any.
 
 Remove EPD construction and framebuffer allocation from the top of
-`deep_sleep_cycle`. When a frame changes, build and encode `next_state`, clear
-and verify RTC, construct EPD inside the refresh closure/block, refresh under
-the existing `_safe_sleep`, then commit exact verified bytes. On unchanged
-content, encode and commit without invalidation or panel construction.
+`deep_sleep_cycle`. When a frame changes, build and encode `next_state`, first
+strict-decode the candidate in the current settings/section context, clear and
+verify RTC, construct EPD inside the refresh closure/block, refresh under the
+existing `_safe_sleep`, then commit exact verified bytes. An invalid candidate
+touches neither RTC nor EPD. On unchanged content, encode, preflight, and commit
+without invalidation or panel construction.
 
 Use `elapsed_due` for weather, NTP, and full-refresh checks. Print a stable
 numeric `main: reset cause = N` line. Catch unexpected exceptions around only
 the deep-sleep branch and call `_recover_deep_sleep`; keep `KeyboardInterrupt`,
 configuration error, and awake-mode behavior intact.
+
+Integration-closeout amendments from final review:
+
+- Strict-decode every encoded candidate before RTC invalidation or EPD work.
+- Canonicalize fresh secondary departure rows as lists before frame equality.
+- Validate weather usability on every wake and force a fetch on date mismatch,
+  even when its elapsed pull interval is not due.
+- Reject blank stop names and cap names at 32 characters; exercise a two-stop,
+  three-departure, non-BMP-name frame with weather under the 2048-byte budget.
+- Recovery disables STA, invalidates RTC, sleeps for 60 seconds, and resets if
+  deep sleep returns. Missing credentials remain an ordinary committed
+  Wi-Fi-error wake.
+- Carry a successful cold-boot NTP epoch into the first cycle so it is retained
+  without a duplicate NTP request.
 
 - [ ] **Step 5: Verify GREEN, full suite, typing, and compilation**
 
@@ -608,8 +632,9 @@ immediately before reset. Do not delete server/lib files or introduce the cleanu
 
 - [ ] **Step 4: Update reliability documentation**
 
-In `AGENTS.md`, record strict RTC compatibility, invalidate-refresh-commit
-ordering, early framebuffer allocation, WDT-covered Wi-Fi/NTP, fresh per-wake
+In `AGENTS.md`, record strict RTC compatibility, candidate validation plus
+invalidate-refresh-commit ordering, WDT -> Wi-Fi -> framebuffer allocation,
+WDT-covered Wi-Fi/NTP, fresh per-wake
 Wi-Fi reset, bounded fatal deep-sleep recovery, future timestamp handling, and
 `main.py`-last deployment. Preserve all hardware facts and awake-mode notes.
 

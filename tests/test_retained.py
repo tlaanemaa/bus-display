@@ -3,6 +3,7 @@ import copy
 import pytest
 
 import retained
+import settings
 
 
 def _settings():
@@ -235,6 +236,35 @@ def test_realistic_two_stop_maximum_frame_fits_rtc_memory():
     ]
     second = copy.deepcopy(section)
     second["name"] = "Grisslinge"
+    state["frame"][0].append(second)
+    state["frame"][1] = ["Sondag 19 juli", "14:32"]
+    state["frame"][2] = _weather()
+    state["weather"] = _weather()
+    state["weather_time"] = 1784464320
+    state["weather_bucket"] = 99136
+    state["last_ntp"] = 1784460000
+    assert len(retained.encode(state)) < retained.MAX_BYTES
+
+
+def test_worst_case_accepted_stop_names_and_departure_count_fit_rtc_memory():
+    cfg = settings.validate({
+        "stops": [
+            {"name": "\U0001f600" * settings.MAX_STOP_NAME_CHARS, "site_id": 1234},
+            {"name": "\U0001f680" * settings.MAX_STOP_NAME_CHARS, "site_id": 4321},
+        ],
+        "departures_per_stop": 3,
+        "power": {"deep_sleep": True, "wake_advance_s": 3},
+    })
+    state = _state(cfg)
+    first = state["frame"][0][0]
+    first["name"] = cfg["stops"][0]["name"]
+    first["dest"] = "Stockholm Slussen via centrum"
+    first["rows"] = [
+        ["474", "Stockholm Slussen via centrum", "119 min"],
+        ["440", "Orminge centrum via Nacka", "120 min"],
+    ]
+    second = copy.deepcopy(first)
+    second["name"] = cfg["stops"][1]["name"]
     state["frame"][0].append(second)
     state["frame"][1] = ["Sondag 19 juli", "14:32"]
     state["frame"][2] = _weather()

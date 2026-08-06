@@ -100,6 +100,13 @@ def app(monkeypatch):
             raise DeepSleepCalled()
 
     machine.deepsleep = deepsleep
+    machine.reset_calls = 0
+
+    def reset():
+        machine.reset_calls += 1
+        events.append("reset")
+
+    machine.reset = reset
     machine.reset_cause_calls = 0
 
     def reset_cause():
@@ -298,7 +305,10 @@ def app(monkeypatch):
         framebuf.sizes.clear()
         return wdt, fb, fb_buf
 
-    def run_cycle(changed=True, state=None, connected=False, cfg=None):
+    def run_cycle(
+        changed=True, state=None, connected=False, cfg=None,
+        cold_ntp_epoch=None,
+    ):
         cfg = cfg or namespace.cfg
         state = dict(state or namespace.state_unchanged)
         state["frame"] = [
@@ -316,19 +326,24 @@ def app(monkeypatch):
                 state, now, 0)
         if "wdt" in inspect.signature(main.deep_sleep_cycle).parameters:
             args += (wdt, fb, fb_buf)
+        if "cold_ntp_epoch" in inspect.signature(main.deep_sleep_cycle).parameters:
+            args += (cold_ntp_epoch,)
         real_asyncio_run(main.deep_sleep_cycle(*args))
         return wdt, fb, fb_buf
 
-    def run_main_once(cfg=None):
+    def run_main_once(cfg=None, wifi_cfg=_MISSING):
         cfg = cfg or namespace.cfg
+        if wifi_cfg is _MISSING:
+            wifi_cfg = {"ssid": "home", "password": "secret"}
         rtc.raw = b""
         events.clear()
         framebuf.sizes.clear()
         encoded.clear()
         monkeypatch.setattr(main.settings, "load", lambda: cfg)
-        monkeypatch.setattr(main.config, "load", lambda: {
-            "wifi": {"ssid": "home", "password": "secret"},
-        })
+        monkeypatch.setattr(
+            main.config, "load",
+            lambda: {} if wifi_cfg is None else {"wifi": wifi_cfg},
+        )
 
         def connect_sta(_ssid, _password, timeout_ms=15_000, wdt=None):
             events.append("wifi-connect")
@@ -376,6 +391,31 @@ def test_encode_failure_does_not_construct_epd_or_touch_rtc(app, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("changed", [True, False])
+def test_invalid_encoded_candidate_does_not_construct_epd_or_touch_rtc(
+    app, monkeypatch, changed,
+):
+    decode_calls = []
+
+    def reject_candidate(raw, fingerprint, section_count):
+        decode_calls.append((raw, fingerprint, section_count))
+        return None
+
+    monkeypatch.setattr(app.main.retained, "decode", reject_candidate)
+    with pytest.raises(ValueError, match="strict validation"):
+        app.run_cycle(changed=changed)
+    assert decode_calls == [(
+        app.encoded[-1],
+        app.main.retained.settings_fingerprint(app.cfg),
+        len(app.cfg["stops"]),
+    )]
+    assert "epd-construct" not in app.events
+    assert not any(
+        isinstance(event, str) and event.startswith("rtc-")
+        for event in app.events
+    )
+
+
 def test_refresh_failure_leaves_rtc_empty_and_sleeps_panel(app):
     app.epd.fail_refresh = True
     with pytest.raises(OSError, match="refresh failed"):
@@ -390,6 +430,28 @@ def test_unchanged_frame_commits_without_constructing_panel(app):
     assert "epd-construct" not in app.events
     assert app.events.index("encode") < app.events.index("rtc-commit")
     assert "rtc-empty" not in app.events
+
+
+def test_secondary_departure_row_is_canonical_and_unchanged_skips_panel(
+    app, monkeypatch,
+):
+    deps = [
+        {"line": "474", "destination": "Slussen", "display": "4 min"},
+        {"line": "440", "destination": "Nacka", "display": "12 min"},
+    ]
+    section = app.main.display.stop_section("Rosenmalm", deps, stale=False)
+    section["rows"] = [list(row) for row in section["rows"]]
+    state = dict(app.state_unchanged)
+    state.update(
+        frame=[[section], ["Tor 6 aug 12:00"], None],
+        last_ntp=1_000,
+    )
+    monkeypatch.setattr(
+        app.main, "_fetch_all_stops",
+        lambda cfg, retries=1, wdt=None: [deps],
+    )
+    app.run_cycle(changed=False, state=state, connected=True)
+    assert "epd-construct" not in app.events
 
 
 def test_deep_sleep_boot_starts_wifi_before_reserving_framebuffer(app):
@@ -514,6 +576,16 @@ def test_cold_boot_recalculates_request_boundary_after_ntp_attempt(app, monkeypa
     assert boundary_inputs == [1_001, 1_020]
 
 
+def test_successful_cold_boot_ntp_is_not_repeated_and_is_retained(app):
+    app.run_main_once()
+    assert app.events.count("ntp") == 1
+    decoded = app.main.retained.decode(
+        app.rtc.raw, app.main.retained.settings_fingerprint(app.cfg), 1,
+    )
+    assert decoded is not None
+    assert decoded["last_ntp"] == 1_000
+
+
 def test_unexpected_deep_sleep_failure_invalidates_and_sleeps_for_one_minute(
     app, monkeypatch, capsys,
 ):
@@ -525,6 +597,20 @@ def test_unexpected_deep_sleep_failure_invalidates_and_sleeps_for_one_minute(
         app.main._recover_deep_sleep(RuntimeError("boom"))
     assert app.rtc.raw == b""
     assert app.machine.deepsleep_calls[-1] == 60_000
+    assert app.machine.reset_calls == 0
+    assert app.events.index("wifi-off") < app.events.index("rtc-empty")
+    assert app.events.index("rtc-empty") < app.events.index(("deepsleep", 60_000))
+    assert "boom" in capsys.readouterr().out
+
+
+def test_recovery_resets_if_deep_sleep_unexpectedly_returns(app, capsys):
+    app.main._recover_deep_sleep(RuntimeError("boom"))
+    assert app.rtc.raw == b""
+    assert app.machine.deepsleep_calls[-1] == 60_000
+    assert app.machine.reset_calls == 1
+    assert app.events.index("wifi-off") < app.events.index("rtc-empty")
+    assert app.events.index("rtc-empty") < app.events.index(("deepsleep", 60_000))
+    assert app.events.index(("deepsleep", 60_000)) < app.events.index("reset")
     assert "boom" in capsys.readouterr().out
 
 
@@ -571,6 +657,120 @@ def test_expected_weather_failure_commits_error_frame_and_uses_next_wake(
     assert decoded is not None
     assert decoded["frame"][0][0]["stale"] is True
     assert decoded["frame"][2] == app.main.display.WEATHER_ERROR
+    assert app.machine.deepsleep_calls[-1] != 60_000
+
+
+def test_retained_invalid_weather_payload_uses_normal_weather_error_policy(
+    app, monkeypatch,
+):
+    cfg = _valid_cfg({
+        "enabled": True, "latitude": 59.33, "longitude": 18.06,
+        "pull_interval_min": 30, "max_age_min": 180,
+    })
+    monkeypatch.setattr(app.main.openmeteo, "fetch_today", lambda *_args, **_kwargs: {
+        "daily": {
+            "time": [7],
+            "temperature_2m_max": [20], "temperature_2m_min": [10],
+        },
+        "hourly": {
+            "time": ["2026-08-06T12:00"], "weather_code": [0],
+            "precipitation_probability": [0],
+        },
+    })
+    app.run_cycle(changed=True, state=None, connected=True, cfg=cfg)
+    decoded = app.main.retained.decode(
+        app.rtc.raw, app.main.retained.settings_fingerprint(cfg), 1,
+    )
+    assert decoded is not None
+    assert decoded["weather"] is None
+    assert decoded["frame"][2] == app.main.display.WEATHER_ERROR
+    assert app.machine.deepsleep_calls[-1] != 60_000
+
+
+def test_prior_day_weather_fetches_immediately_even_inside_interval(
+    app, monkeypatch,
+):
+    cfg = _valid_cfg({
+        "enabled": True, "latitude": 59.33, "longitude": 18.06,
+        "pull_interval_min": 30, "max_age_min": 180,
+    })
+    old_reading = {
+        "date": "2026-08-05", "condition": "clear",
+        "tmin": 10, "tmax": 20, "precip": 0,
+    }
+    state = dict(app.state_unchanged)
+    state.update(
+        settings=app.main.retained.settings_fingerprint(cfg),
+        frame=[[_section(stale=False)], ["Tor 6 aug 12:00"], old_reading],
+        weather=old_reading, weather_time=999, weather_bucket=0,
+        last_ntp=1_000,
+    )
+    fetches = []
+
+    def fetch_today(*_args, **_kwargs):
+        fetches.append(True)
+        return {
+            "daily": {
+                "time": ["2026-08-06"],
+                "temperature_2m_max": [21], "temperature_2m_min": [11],
+            },
+            "hourly": {
+                "time": ["2026-08-06T12:00"], "weather_code": [0],
+                "precipitation_probability": [0],
+            },
+        }
+
+    monkeypatch.setattr(app.main.openmeteo, "fetch_today", fetch_today)
+    app.run_cycle(changed=False, state=state, connected=True, cfg=cfg)
+    assert fetches == [True]
+    decoded = app.main.retained.decode(
+        app.rtc.raw, app.main.retained.settings_fingerprint(cfg), 1,
+    )
+    assert decoded is not None
+    assert decoded["weather"]["date"] == "2026-08-06"
+
+
+def test_expired_weather_is_not_shown_while_a_long_pull_interval_waits(
+    app, monkeypatch,
+):
+    cfg = _valid_cfg({
+        "enabled": True, "latitude": 59.33, "longitude": 18.06,
+        "pull_interval_min": 300, "max_age_min": 180,
+    })
+    old_reading = {
+        "date": "2026-08-06", "condition": "clear",
+        "tmin": 10, "tmax": 20, "precip": 0,
+    }
+    state = dict(app.state_unchanged)
+    state.update(
+        settings=app.main.retained.settings_fingerprint(cfg),
+        frame=[[_section(stale=False)], ["Tor 6 aug 12:00"], old_reading],
+        weather=old_reading, weather_time=1_000 - 4 * 3600,
+        weather_bucket=0, last_ntp=1_000,
+    )
+    fetches = []
+    monkeypatch.setattr(
+        app.main.openmeteo, "fetch_today",
+        lambda *_args, **_kwargs: fetches.append(True),
+    )
+    app.run_cycle(changed=False, state=state, connected=True, cfg=cfg)
+    assert fetches == []
+    decoded = app.main.retained.decode(
+        app.rtc.raw, app.main.retained.settings_fingerprint(cfg), 1,
+    )
+    assert decoded is not None
+    assert decoded["frame"][2] == app.main.display.WEATHER_ERROR
+
+
+def test_missing_credentials_commits_wifi_error_with_one_buffer_and_sleeps(app):
+    app.run_main_once(wifi_cfg=None)
+    assert "wifi-connect" not in app.events
+    assert app.framebuf.sizes == [48_000]
+    decoded = app.main.retained.decode(
+        app.rtc.raw, app.main.retained.settings_fingerprint(app.cfg), 1,
+    )
+    assert decoded is not None
+    assert decoded["frame"][2] == app.main.display.WIFI_ERROR
     assert app.machine.deepsleep_calls[-1] != 60_000
 
 

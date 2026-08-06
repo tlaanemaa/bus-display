@@ -59,6 +59,23 @@ def test_validate_rejects_values_that_can_break_runtime(mutate):
         settings.validate(raw)
 
 
+@pytest.mark.parametrize(
+    "name", ["   ", "x" * (settings.MAX_STOP_NAME_CHARS + 1)],
+)
+def test_validate_rejects_blank_or_overlong_stop_names(name):
+    raw = valid_settings()
+    raw["stops"][0]["name"] = name
+    with pytest.raises(settings.SettingsError, match="stop name"):
+        settings.validate(raw)
+
+
+def test_validate_accepts_stop_name_at_rtc_budget_limit():
+    raw = valid_settings()
+    name = "x" * settings.MAX_STOP_NAME_CHARS
+    raw["stops"][0]["name"] = name
+    assert settings.validate(raw)["stops"][0]["name"] == name
+
+
 def test_validate_rejects_nan_weather_coordinates():
     raw = valid_settings()
     raw["weather"]["latitude"] = float("nan")

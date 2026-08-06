@@ -296,9 +296,6 @@ def _rtc_state_commit(raw: bytes, cfg: "dict[str, Any]") -> None:
     rtc.memory(raw)
     readback = rtc.memory()
     # Compare the exact stored bytes, then independently validate decoding.
-    # Do not compare decoded JSON to the live Python object: display rows are
-    # tuples while JSON canonically restores arrays as lists, so semantically
-    # identical state would falsely fail an object-equality check.
     if (readback != raw or retained.decode(
             readback, retained.settings_fingerprint(cfg), len(cfg["stops"]),
     ) is None):
@@ -314,10 +311,17 @@ def _recover_deep_sleep(exc: Exception) -> None:
     except AttributeError:
         print(repr(exc))
     try:
+        network.WLAN(network.STA_IF).active(False)
+    except Exception:
+        pass
+    try:
         _rtc_state_invalidate()
     except Exception as invalidate_error:
         print("retained: recovery invalidation failed:", invalidate_error)
     machine.deepsleep(60_000)
+    # machine.deepsleep() should not return. A reset is the last-resort way
+    # out if a port/hardware fault violates that contract.
+    machine.reset()
 
 
 def _stale_section(
@@ -340,6 +344,7 @@ async def deep_sleep_cycle(
     wdt: "Any",
     fb: "Any",
     fb_buf: bytearray,
+    cold_ntp_epoch: "int | None" = None,
 ) -> None:
     """One wake -> boundary-aligned fetch/render -> retained state -> sleep."""
     previous_frame = state.get("frame") if state else None
@@ -348,7 +353,7 @@ async def deep_sleep_cycle(
     last_weather = state.get("weather") if state else None
     last_weather_time = state.get("weather_time") if state else None
     last_weather_bucket = state.get("weather_bucket") if state else None
-    last_ntp_epoch = state.get("last_ntp") if state else None
+    last_ntp_epoch = state.get("last_ntp") if state else cold_ntp_epoch
 
     lead_observed_ms = time.ticks_diff(time.ticks_ms(), boot_ticks)
     print("power: preparation took %d ms; requests target epoch %d" % (lead_observed_ms, request_epoch))
@@ -380,12 +385,21 @@ async def deep_sleep_cycle(
                            and weather_cfg.get("latitude") is not None
                            and weather_cfg.get("longitude") is not None)
     weather_error = False
-    if weather_enabled and connected and isinstance(weather_cfg, dict):
+    if weather_enabled and isinstance(weather_cfg, dict):
         weather_interval_s = weather_cfg.get("pull_interval_min", 30) * 60
+        max_age_s = weather_cfg.get("max_age_min", 180) * 60
+        weather_now = time.time()
+        today_iso = _local_today_iso()
+        age_s = (None if last_weather_time is None
+                 else int(weather_now - last_weather_time))
+        usable_last_weather = weather.keep_last_good(
+            last_weather, today_iso, age_s, max_age_s,
+        )
         weather_bucket = int(time.time() // weather_interval_s)
-        if wake_schedule.elapsed_due(
-            time.time(), last_weather_time, weather_interval_s,
-        ):
+        weather_due = (wake_schedule.elapsed_due(
+            weather_now, last_weather_time, weather_interval_s,
+        ) or not weather.is_for_today(last_weather, today_iso))
+        if connected and weather_due:
             fetched = None
             try:
                 wdt.feed()
@@ -395,20 +409,17 @@ async def deep_sleep_cycle(
                 wdt.feed()
             except Exception as e:
                 print("weather: fetch failed:", e)
-            if fetched is not None:
+            if (fetched is not None
+                    and weather.is_for_today(fetched, today_iso)):
                 last_weather = fetched
                 last_weather_time = int(time.time())
                 last_weather_bucket = weather_bucket
+                usable_last_weather = True
                 print("weather: " + weather.summary_text(fetched))
-            else:
-                max_age_s = weather_cfg.get("max_age_min", 180) * 60
-                age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
-                weather_error = not weather.keep_last_good(
-                    last_weather, _local_today_iso(), age_s, max_age_s)
-    elif weather_enabled and isinstance(weather_cfg, dict):
-        max_age_s = weather_cfg.get("max_age_min", 180) * 60
-        age_s = None if last_weather_time is None else int(time.time() - last_weather_time)
-        weather_error = not weather.keep_last_good(last_weather, _local_today_iso(), age_s, max_age_s)
+        # Re-evaluate on every wake, even when no pull is due or Wi-Fi is
+        # unavailable, so a reading that crosses midnight/age policy cannot
+        # continue appearing beside a live clock as though it were current.
+        weather_error = not usable_last_weather
 
     # RTC survives deep sleep. Resync at most daily, after the boundary so
     # ordinary wakes perform no network request before :00.
@@ -444,15 +455,20 @@ async def deep_sleep_cycle(
     if content_changed and full:
         last_full_epoch = now_epoch
 
+    settings_fingerprint = retained.settings_fingerprint(cfg)
     next_state = {
         "v": retained.STATE_VERSION,
         "render_rev": retained.RENDER_REVISION,
-        "settings": retained.settings_fingerprint(cfg),
+        "settings": settings_fingerprint,
         "frame": frame, "last_full": last_full_epoch,
         "weather": last_weather, "weather_time": last_weather_time,
         "weather_bucket": last_weather_bucket, "last_ntp": last_ntp_epoch,
     }
     raw = retained.encode(next_state)
+    if retained.decode(
+        raw, settings_fingerprint, len(cfg["stops"]),
+    ) is None:
+        raise ValueError("encoded retained state failed strict validation")
 
     if content_changed:
         print("power: content changed, %s refresh" % ("full" if full else "partial"))
@@ -780,20 +796,24 @@ async def main() -> None:
             # before choosing its first request boundary; normal retained
             # wakes perform their daily NTP request after the :00 boundary.
             if connected and state is None:
+                cold_ntp_epoch = None
                 try:
                     wdt.feed()
                     ntptime.settime()
+                    cold_ntp_epoch = int(time.time())
                     print("main: cold-boot NTP sync ok")
                 except Exception as e:
                     print("main: cold-boot NTP sync failed:", e)
                 finally:
                     wdt.feed()
                 request_epoch = wake_schedule.request_boundary(time.time(), 60)
+            else:
+                cold_ntp_epoch = None
 
             print("main: deep-sleep mode; wake advance = %d s" % wake_advance_s)
             await deep_sleep_cycle(
                 cfg, wifi_cfg, connected, state, request_epoch, boot_ticks,
-                wdt, fb, fb_buf,
+                wdt, fb, fb_buf, cold_ntp_epoch,
             )
         except KeyboardInterrupt:
             raise

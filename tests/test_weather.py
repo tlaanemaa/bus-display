@@ -91,10 +91,10 @@ def test_parse_extracts_forecast_date_for_staleness_check():
     # kept last-good reading is still today's vs. from a prior day.
     w = weather.parse_weather(_raw(_all_day(0)))
     assert w["date"] == "2026-07-12"
-    # Missing time array -> date None (caller treats that as not-today).
+    # Missing time array cannot produce a retained-valid reading.
     raw = _raw(_all_day(0))
     del raw["daily"]["time"]
-    assert weather.parse_weather(raw)["date"] is None
+    assert weather.parse_weather(raw) is None
 
 
 def test_rain_intensity_buckets():
@@ -137,6 +137,16 @@ def test_parse_missing_or_empty_returns_none():
 def test_parse_precip_optional():
     w = weather.parse_weather(_raw(_all_day(0)))  # no precip values anywhere
     assert w["precip"] is None
+
+
+def test_parse_rejects_values_that_retained_state_cannot_validate():
+    invalid_date = _raw(_all_day(0, 10))
+    invalid_date["daily"]["time"] = [7]
+    assert weather.parse_weather(invalid_date) is None
+
+    for precip in (-1, 101):
+        invalid_precip = _raw(_all_day(0, precip))
+        assert weather.parse_weather(invalid_precip) is None
 
 
 def test_is_for_today_keeps_todays_reading_only():

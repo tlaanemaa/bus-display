@@ -57,7 +57,7 @@ def test_stop_section_splits_hero_and_truncates_destination():
     assert section["hero_unit"] == "min"
     assert section["badge_line"] == "474"
     assert section["dest"] == "Slussen"
-    assert section["rows"] == [("440", "Slussen", "12 min"), ("425", "Nacka", "19 min")]
+    assert section["rows"] == [["440", "Slussen", "12 min"], ["425", "Nacka", "19 min"]]
 
 
 def test_stop_section_no_departures_skips_hero():

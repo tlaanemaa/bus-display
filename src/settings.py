@@ -13,6 +13,11 @@ if False:
 
 PATH = "/settings.json"
 
+# Keeps the owner-controlled portion of a maximum two-stop semantic frame
+# comfortably inside retained.MAX_BYTES (2048), even when every character
+# expands to a non-BMP JSON escape on CPython. See the retained budget test.
+MAX_STOP_NAME_CHARS = 32
+
 
 class SettingsError(ValueError):
     """The settings file cannot be used safely by the runtime."""
@@ -26,7 +31,9 @@ def _copy(value: object) -> object:
     return value
 
 
-def _integer(value: object, name: str, minimum: int, maximum: int | None = None) -> int:
+def _integer(
+    value: object, name: str, minimum: int, maximum: "int | None" = None,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise SettingsError(name + " must be an integer")
     if value < minimum or (maximum is not None and value > maximum):
@@ -34,7 +41,9 @@ def _integer(value: object, name: str, minimum: int, maximum: int | None = None)
     return value
 
 
-def _number(value: object, name: str, minimum: float, maximum: float) -> float | int:
+def _number(
+    value: object, name: str, minimum: float, maximum: float,
+) -> "float | int":
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SettingsError(name + " must be a number")
     if not minimum <= value <= maximum:
@@ -57,8 +66,12 @@ def validate(raw: object) -> "dict[str, Any]":
         if not isinstance(stop, dict):
             raise SettingsError("each stop must be an object")
         name = stop.get("name")
-        if not isinstance(name, str) or not name:
-            raise SettingsError("stop name must be a non-empty string")
+        if (not isinstance(name, str) or not name.strip()
+                or len(name) > MAX_STOP_NAME_CHARS):
+            raise SettingsError(
+                "stop name must be a non-blank string of at most %d characters"
+                % MAX_STOP_NAME_CHARS
+            )
         _integer(stop.get("site_id"), "stop site_id", 1)
 
     cfg["direction_code"] = _integer(cfg.get("direction_code", 2), "direction_code", 1, 2)

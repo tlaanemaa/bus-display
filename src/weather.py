@@ -160,27 +160,36 @@ def parse_weather(
     hourly = raw_json.get("hourly")
     if not isinstance(daily, dict) or not isinstance(hourly, dict):
         return None
+    date = _first(daily, "time")
     tmax = _first(daily, "temperature_2m_max")
     tmin = _first(daily, "temperature_2m_min")
-    if tmax is None or tmin is None:
+    if (not isinstance(date, str) or isinstance(tmax, bool)
+            or isinstance(tmin, bool)
+            or not isinstance(tmax, (int, float))
+            or not isinstance(tmin, (int, float))):
         return None
     codes, precips = _daytime_hourly(hourly)
     if not codes:
         return None
-    precip = max(precips) if precips else None
+    try:
+        precip = None if not precips else int(round(max(precips)))
+    except (TypeError, ValueError):
+        return None
+    if precip is not None and not 0 <= precip <= 100:
+        return None
     return {
         "condition": dominant_condition(codes),
         "tmax": int(round(tmax)),
         "tmin": int(round(tmin)),
-        "precip": None if precip is None else int(round(precip)),
+        "precip": precip,
         # The forecast's own local date ("YYYY-MM-DD" from Open-Meteo's
         # daily.time[0], returned regardless of which fields we request).
         # Lets the caller decide a kept last-good reading is still valid --
         # a daily high/low/condition a few hours old is still "today", but a
         # reading from a prior day is stale (see main.py's weather handling).
-        # None only if the payload somehow omits time (Open-Meteo always sends
-        # it); callers treat a missing/mismatched date as not-today.
-        "date": _first(daily, "time"),
+        # A missing/non-string date makes the whole payload unusable above,
+        # keeping every parsed reading valid for retained-state encoding.
+        "date": date,
     }
 
 

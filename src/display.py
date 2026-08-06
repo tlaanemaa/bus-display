@@ -467,7 +467,7 @@ def stop_section(
     """Pure: content for one stop's section (no drawing) -- the hero
     departure split into (main, unit) for the two-size hero treatment,
     its route badge + destination (truncated to fit at head size), and
-    the remaining departures as (line, destination, display) rows
+    the remaining departures as canonical [line, destination, display] rows
     (truncated to fit at row size, accounting for that row's own badge
     and right-aligned time width). "No departures" never gets the hero
     treatment -- there's nothing urgent to emphasize.
@@ -498,7 +498,11 @@ def stop_section(
         bw = _badge_w(row, dep["line"], BADGE_PAD_X_ROW)
         time_w = row.measure(dep["display"])
         dest_max_w = CONTENT_W - bw - GAP_BADGE_DEST - time_w - GAP_DEST_TIME
-        rows.append((dep["line"], _truncate_to_width(row, dep["destination"], dest_max_w), dep["display"]))
+        rows.append([
+            dep["line"],
+            _truncate_to_width(row, dep["destination"], dest_max_w),
+            dep["display"],
+        ])
 
     return {"name": name, "hero_main": hero_main, "hero_unit": hero_unit,
             "badge_line": badge_line, "dest": dest, "rows": rows, "stale": stale}
@@ -513,7 +517,10 @@ def section_lines(section: "dict[str, Any]") -> "list[str]":
         lines.append("%s  %s" % (section["badge_line"], section["dest"]))
     else:
         lines.append(section["dest"])
-    lines.extend("%s  %s  %s" % row for row in section["rows"])
+    lines.extend(
+        "%s  %s  %s" % (row[0], row[1], row[2])
+        for row in section["rows"]
+    )
     return lines
 
 
