@@ -13,15 +13,17 @@ to src/settings.json, fill in your stop(s) (see AGENTS.md "Departures
 logic & stops" for how to find a site id), then deploy it like any other
 file: `mpremote connect COM3 fs cp src/settings.json :settings.json`.
 
-The 48KB framebuffer is allocated ONCE at boot (in display_loop) and kept
-resident, reused for every refresh -- see AGENTS.md "RAM-vs-HTTPS conflict
-(RESOLVED)". This reverses an earlier design: the framebuffer used to be
-allocated transiently, per cycle, ONLY because a resident buffer starved
+The 48KB framebuffer is allocated ONCE per boot/wake and kept resident for
+that operating cycle: deep-sleep mode allocates it in main() through
+_allocate_framebuffer(), before RTC/network work; awake mode allocates it in
+display_loop(). It is reused for every refresh -- see AGENTS.md "RAM-vs-HTTPS
+conflict (RESOLVED)". This reverses an earlier design: the framebuffer used to
+be allocated transiently, per cycle, ONLY because a resident buffer starved
 the SL TLS handshake (mbedtls's RSA-2048 cert verification needs a large
-contiguous block). Now that SL and Open-Meteo are fetched over plain HTTP
-(no TLS handshake at all), that pressure is gone -- and a resident buffer
-is also more robust, since a fresh 48KB alloc had begun to MemoryError on
-later cycles as the heap fragmented (MicroPython's GC never compacts).
+contiguous block). Now that SL and Open-Meteo are fetched over plain HTTP (no
+TLS handshake at all), that pressure is gone -- and a resident buffer is also
+more robust, since a fresh 48KB alloc had begun to MemoryError on later cycles
+as the heap fragmented (MicroPython's GC never compacts).
 
 The legacy Microdot setup server is not imported or used. It remains in
 the tree only as known cleanup debt; importing it would build an unused
@@ -185,7 +187,8 @@ def _draw_and_refresh(
     full: bool,
 ) -> None:
     """Draws `frame` into the RESIDENT framebuffer (fb/fb_buf, allocated once
-    at boot and passed in -- see display_loop) and pushes it to the panel.
+    by main() via _allocate_framebuffer() in deep-sleep mode, or by
+    display_loop() in awake mode) and pushes it to the panel.
 
     The framebuffer used to be allocated transiently, per cycle, ONLY because
     a resident 48KB buffer starved the SL TLS handshake (AGENTS.md "RAM-vs-

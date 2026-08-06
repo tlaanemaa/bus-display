@@ -392,6 +392,7 @@ def test_deep_sleep_boot_reserves_resources_before_rtc_wifi_ntp_or_epd(app):
     app.run_main_once()
     allocation = app.events.index("framebuffer")
     watchdog = app.events.index("wdt-construct")
+    assert allocation < watchdog
     for later in ("rtc-read", "wifi-connect", "ntp", "epd-construct"):
         assert allocation < app.events.index(later)
         assert watchdog < app.events.index(later)
