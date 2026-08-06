@@ -77,12 +77,12 @@ for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
 
 echo Deploying to %PORTDESC% ...
 
-rem --- top-level files: main.py (source), the compiled modules, settings ---
-rem Only the .mpy go to the device -- NOT the .py (except main.py). Shipping
-rem the source too would be inert dead flash (MicroPython always prefers the
-rem .mpy) and just invites confusion about which one runs. settings.example.json
-rem is a repo-only template -- the device needs the real settings.json only.
-for %%F in ("%SRCDIR%\main.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
+rem --- top-level support files: compiled modules and settings ----------------
+rem Only the .mpy go to the device -- NOT the .py (except main.py, activated
+rem last below). Shipping source alongside bytecode would be inert dead flash
+rem and invites confusion about which one runs. settings.example.json is a
+rem repo-only template -- the device needs the real settings.json only.
+for %%F in ("%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
     if /I not "%%~nxF"=="settings.example.json" (
         echo   cp %%~nxF
         %MP% %CONN% fs cp "%%F" ":%%~nxF"
@@ -108,6 +108,11 @@ for %%F in ("%SRCDIR%\fonts\*.fnt") do (
     %MP% %CONN% fs cp "%%F" ":fonts/%%~nxF"
     if errorlevel 1 goto :fail
 )
+
+rem --- activate new firmware only after every support file copied -----------
+echo   cp main.py
+%MP% %CONN% fs cp "%SRCDIR%\main.py" ":main.py"
+if errorlevel 1 goto :fail
 
 echo Resetting %PORTDESC% ...
 %MP% %CONN% reset

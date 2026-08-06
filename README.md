@@ -57,6 +57,21 @@ Run the host checks before deploying:
 
 There is no setup access point. If Wi-Fi credentials are missing or the network is unavailable, the panel says so and retries on the next minute-aligned wake.
 
+## Reliability and required hardware acceptance
+
+Settings and Wi-Fi configuration are validated at their JSON boundaries. In deep-sleep mode the firmware reserves one framebuffer before RTC/network work, uses strict versioned retained state, and commits a changed frame only after `encode → RTC invalidate → panel refresh/sleep → RTC commit`; unchanged frames do not wake the panel. Wi-Fi is reset per wake, network responses require 2xx status plus the expected JSON envelope and are always closed, and unexpected deep-sleep errors clear retained state before a bounded 60-second retry.
+
+The reliability changes are host-verified; COM3 acceptance remains required before merge. Run the following without printing private settings or credentials:
+
+```
+.venv\Scripts\python -m mpremote connect list
+.venv\Scripts\python -m mpremote connect COM3 fs ls
+deploy.bat COM3
+.venv\Scripts\python -m mpremote connect COM3 repl
+```
+
+Observe at least five minute-boundary wakes in serial and have the owner confirm the visible updates, full/partial refresh behavior, and panel sleep. Then verify an RTC-clear full-refresh recovery and an owner-approved Wi-Fi outage/recovery before merging.
+
 ## Repo layout
 
 ```
