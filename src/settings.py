@@ -37,7 +37,7 @@ def _integer(value: object, name: str, minimum: int, maximum: int | None = None)
 def _number(value: object, name: str, minimum: float, maximum: float) -> float | int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SettingsError(name + " must be a number")
-    if value < minimum or value > maximum:
+    if not minimum <= value <= maximum:
         raise SettingsError(name + " is out of range")
     return value
 
@@ -107,10 +107,13 @@ def validate(raw: object) -> "dict[str, Any]":
 def load() -> "dict[str, Any]":
     try:
         with open(PATH) as f:
-            return validate(json.load(f))
-    except (OSError, ValueError) as e:
+            raw = json.load(f)
+    except OSError as e:
         raise SettingsError(
             "settings.json missing on device -- copy src/settings.example.json "
             "to src/settings.json, fill in your stop(s), then: "
             "mpremote connect COM3 fs cp src/settings.json :settings.json"
         ) from e
+    except ValueError as e:
+        raise SettingsError("settings.json is not valid JSON") from e
+    return validate(raw)

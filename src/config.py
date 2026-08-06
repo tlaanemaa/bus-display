@@ -53,11 +53,12 @@ def validate(raw: object) -> "dict[str, Any]":
 def load() -> "dict[str, Any]":
     try:
         with open(PATH) as f:
-            return validate(json.load(f))
+            raw = json.load(f)
     except OSError:
         return {}
     except ValueError as e:
         raise ConfigError("config.json is not valid JSON") from e
+    return validate(raw)
 
 
 def save(config: "dict[str, Any]") -> None:

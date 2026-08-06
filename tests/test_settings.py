@@ -59,6 +59,13 @@ def test_validate_rejects_values_that_can_break_runtime(mutate):
         settings.validate(raw)
 
 
+def test_validate_rejects_nan_weather_coordinates():
+    raw = valid_settings()
+    raw["weather"]["latitude"] = float("nan")
+    with pytest.raises(settings.SettingsError):
+        settings.validate(raw)
+
+
 def test_validate_keeps_unknown_keys_and_returns_copied_nested_values():
     raw = valid_settings()
     raw["legacy"] = {"modes": ["old"]}
@@ -93,3 +100,39 @@ def test_config_defaults_password_and_copies_wifi_mapping():
     validated["legacy"]["value"] = 2
     assert validated["wifi"]["password"] == ""
     assert raw == {"wifi": {"ssid": "home"}, "legacy": {"value": 1}}
+
+
+def test_settings_load_keeps_validation_error_message(monkeypatch, tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"stops": []}))
+    monkeypatch.setattr(settings, "PATH", str(path))
+    with pytest.raises(settings.SettingsError, match="one or two stops"):
+        settings.load()
+
+
+def test_settings_load_distinguishes_missing_and_invalid_json(monkeypatch, tmp_path):
+    missing = tmp_path / "missing.json"
+    monkeypatch.setattr(settings, "PATH", str(missing))
+    with pytest.raises(settings.SettingsError, match="missing on device"):
+        settings.load()
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{")
+    monkeypatch.setattr(settings, "PATH", str(malformed))
+    with pytest.raises(settings.SettingsError, match="not valid JSON"):
+        settings.load()
+
+
+def test_config_load_keeps_validation_error_message(monkeypatch, tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"wifi": {"ssid": 7}}))
+    monkeypatch.setattr(config, "PATH", str(path))
+    with pytest.raises(config.ConfigError, match="wifi.ssid must be a string"):
+        config.load()
+
+
+def test_config_load_rejects_invalid_json(monkeypatch, tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text("{")
+    monkeypatch.setattr(config, "PATH", str(path))
+    with pytest.raises(config.ConfigError, match="not valid JSON"):
+        config.load()
