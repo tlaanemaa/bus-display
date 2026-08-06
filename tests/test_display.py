@@ -1,5 +1,5 @@
 """Host-side tests for display.py. A tiny fake buffer stands in for the
-physical framebuf.FrameBuffer main.py would pass in (display.py only
+physical framebuf.FrameBuffer app.py would pass in (display.py only
 calls fb.fill()/fill_rect()/pixel() on it); conftest.py separately fakes
 the `framebuf` module itself, since display.py's scaled built-in font
 needs one for its own internal scratch buffer (AGENTS.md "Testability

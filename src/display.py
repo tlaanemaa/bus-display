@@ -124,7 +124,7 @@ def _fonts() -> "dict[str, bitfont.Font]":
 
 def warm_fonts() -> None:
     """Open the fonts and fully populate their advance caches BEFORE the
-    fetch/render loop starts (main.py calls this once). On a clean boot
+    fetch/render loop starts (app.py calls this once). On a clean boot
     heap this is free; the point is that no font state then gets allocated
     during a live draw -- which, while the 48KB framebuffer is alive,
     would strand objects into the region the next SL TLS handshake needs

@@ -40,7 +40,7 @@ def fetch_today(
     timeout_s: int = 10,
 ) -> "dict[str, Any]":
     """Today's forecast for a lat/lon. timeout_s bounds each attempt like
-    sl.fetch_departures (same intermittent-hang caveat -- main.py's watchdog
+    sl.fetch_departures (same intermittent-hang caveat -- app.py's watchdog
     is the real backstop). Returns the raw Open-Meteo dict;
     weather.parse_weather() turns it into the footer summary.
 

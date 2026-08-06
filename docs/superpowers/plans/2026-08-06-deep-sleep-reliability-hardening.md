@@ -686,14 +686,14 @@ git commit -m "chore: harden firmware activation order"
 - Support bytecode, including `app.mpy`, is copied before source `main.py`;
   `main.mpy` is neither compiled nor shipped.
 
-- [ ] **Step 1: Add packaging and real-runtime RED tests**
+- [x] **Step 1: Add packaging and real-runtime RED tests**
 
 Update the fake-hardware harness to import `src/app.py`. Add source/deployment
 assertions that `main.py` is tiny and imports `app`, `app.py` participates in
 the compile wildcard, support `.mpy` copies precede `:main.py`, and the existing
 `main.mpy` exclusions remain in both compile and copy paths.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 ```text
 .venv\Scripts\python -m pytest tests/test_main_deep_sleep.py tests/test_deploy.py -q
@@ -702,7 +702,7 @@ the compile wildcard, support `.mpy` copies precede `:main.py`, and the existing
 Expected: fail because `src/app.py` does not exist and source `main.py` is the
 full runtime rather than a tiny `import app` shim.
 
-- [ ] **Step 3: Move runtime bytes unchanged and add the shim**
+- [x] **Step 3: Move runtime bytes unchanged and add the shim**
 
 Move `src/main.py` to `src/app.py` without editing its contents. Create a tiny
 `src/main.py` whose concise comment records that importing the precompiled
@@ -713,14 +713,14 @@ Its only executable statement is:
 import app
 ```
 
-- [ ] **Step 4: Update typing, deployment comments, and architecture docs**
+- [x] **Step 4: Update typing, deployment comments, and architecture docs**
 
 Keep mypy's `files = ["src"]` coverage and document that it includes both the
 shim and runtime. Update deploy comments (not its proven wildcard/activation
 mechanics), AGENTS, README, design, and this plan so all runtime references use
 `app.py`, while `main.py` remains source and activation-last.
 
-- [ ] **Step 5: Verify host behavior and packaging**
+- [x] **Step 5: Verify host behavior and packaging**
 
 ```text
 .venv\Scripts\python -m pytest -q
@@ -733,7 +733,7 @@ git diff --check
 Expected: all pass; mypy checks 16 first-party modules. Do not touch COM3 in
 this task.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```text
 git commit -m "fix: precompile firmware runtime for heap safety"
@@ -748,7 +748,7 @@ git commit -m "fix: precompile firmware runtime for heap safety"
 - Consumes the completed reliability branch.
 - Produces evidence for merge readiness; it does not merge.
 
-- [ ] **Step 1: Run fresh complete host verification**
+- [x] **Step 1: Run fresh complete host verification**
 
 ```text
 .venv\Scripts\python -m pytest -v
@@ -767,7 +767,7 @@ foreach ($module in $modules) {
 
 Run `git diff --check` and inspect `git status --short`.
 
-- [ ] **Step 2: Review the complete branch diff against the spec**
+- [x] **Step 2: Review the complete branch diff against the spec**
 
 ```text
 git diff --stat main...HEAD
@@ -779,7 +779,7 @@ Check every design requirement, confirm no panel command sequence changed,
 confirm awake/setup files remain, and resolve every Critical/Important review
 finding with a failing regression test.
 
-- [ ] **Step 3: Inspect COM3 without exposing secrets**
+- [x] **Step 3: Inspect COM3 without exposing secrets**
 
 ```text
 .venv\Scripts\python -m mpremote connect list
@@ -800,14 +800,19 @@ refresh mode, final visible-frame summary, retained commit, and next sleep for
 at least five minute boundaries. Ask the owner to confirm each visible update
 and that full/partial behavior looks normal.
 
-- [ ] **Step 5: Verify retained incompatibility recovery**
+Serial acceptance completed 2026-08-06: one cold full refresh and at least four
+RTC-restored partial refreshes completed, including exact RTC invalidate/commit
+verification and scheduled deep sleep on every captured cycle. Owner visual
+confirmation remains pending, so this step stays open.
+
+- [x] **Step 5: Verify retained incompatibility recovery**
 
 After preserving normal logs, clear only RTC user memory with a one-off
 `mpremote exec`, reset, and observe one full refresh. Observe the following
 changed wake and confirm it returns to partial. Confirm the panel sleeps after
 both.
 
-- [ ] **Step 6: Verify Wi-Fi outage and recovery with owner approval**
+- [x] **Step 6: Verify Wi-Fi outage and recovery with owner approval**
 
 Use an owner-approved router outage or temporary device credential test. Never
 overwrite the only credential copy without first preserving it securely. Verify
@@ -815,7 +820,13 @@ that the screen shows `Wi-Fi unavailable` plus stale stop badges, schedules the
 next wake, and automatically returns to fresh departures after Wi-Fi comes
 back.
 
-- [ ] **Step 7: Re-run host verification after hardware findings**
+Completed without altering the router or saved credentials: a one-cycle
+in-memory bad SSID produced both per-stop `STALE` markers plus
+`wifi: unavailable`, committed the fallback frame, and slept. The next wake
+loaded the unchanged real credentials, reconnected, fetched fresh departures,
+cleared the warning, committed, and slept.
+
+- [x] **Step 7: Re-run host verification after hardware findings**
 
 ```text
 .venv\Scripts\python -m pytest -q

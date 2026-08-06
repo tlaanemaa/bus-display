@@ -186,7 +186,7 @@ def parse_weather(
         # daily.time[0], returned regardless of which fields we request).
         # Lets the caller decide a kept last-good reading is still valid --
         # a daily high/low/condition a few hours old is still "today", but a
-        # reading from a prior day is stale (see main.py's weather handling).
+        # reading from a prior day is stale (see app.py's weather handling).
         # A missing/non-string date makes the whole payload unusable above,
         # keeping every parsed reading valid for retained-state encoding.
         "date": date,
@@ -217,7 +217,7 @@ def keep_last_good(
 
     True only when the reading is both still today's forecast (is_for_today)
     AND fresh enough -- fetched no more than `max_age_s` ago. `age_s` is
-    now - fetched-at (main.py supplies it from the device clock); None means
+    now - fetched-at (app.py supplies it from the device clock); None means
     no prior good fetch -> not usable.
 
     The freshness bound matters because Open-Meteo REVISES the daily forecast
