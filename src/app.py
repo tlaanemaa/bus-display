@@ -806,7 +806,7 @@ async def main() -> None:
 
             # A cold boot has no trustworthy retained wall clock. Sync once
             # before choosing its first request boundary; normal retained
-            # wakes perform their daily NTP request after the :00 boundary.
+            # wakes perform a due five-minute NTP sync before the boundary.
             if connected and state is None:
                 cold_ntp_epoch = None
                 try:
