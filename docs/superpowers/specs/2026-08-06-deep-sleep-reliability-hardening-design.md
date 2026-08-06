@@ -2,7 +2,7 @@
 
 ## Objective
 
-Make the existing deep-sleep implementation on `main` reliable enough for an
+Make the existing deep-sleep runtime reliable enough for an
 unattended household display without merging the broad
 `codex/deep-sleep-cleanup` refactor.
 
@@ -54,8 +54,17 @@ still has production reliability gaps:
 Hardware acceptance on 2026-08-06 later disproved the plan's initial
 framebuffer-before-radio remedy: reserving 48 KB first left only 4 of the 10
 expected Wi-Fi RX buffers, logged deinitialization error `0x3001`, and raised
-`OSError: WiFi Out of Memory`. The accepted deep-sleep boot order is therefore
+`OSError: WiFi Out of Memory`. The required deep-sleep boot order is therefore
 WDT -> Wi-Fi STA initialization -> one framebuffer -> RTC/NTP/API/render/EPD.
+
+A deployment of that corrected order exposed the other half of the allocator
+constraint: serial reached `wifi: connected ...`, then `_allocate_framebuffer`
+raised `MemoryError: memory allocation failed, allocating 48000 bytes`. The
+41.9 KB source `main.py` had been compiled on-device before Wi-Fi, fragmenting
+the heap that remained after STA initialization. Neither allocation order can
+work reliably while the full runtime is source. The runtime is therefore moved
+unchanged to host-precompiled `app.mpy`; source `main.py` becomes a tiny
+`import app` boot shim.
 
 The plain-HTTP SL and Open-Meteo endpoints were rechecked on 2026-08-06 with
 the production query shapes and returned directly without redirects. Their
@@ -65,7 +74,7 @@ transport choice is not changed by this work.
 
 ### Preserve
 
-- The current `main` architecture and its awake-mode fallback.
+- The current runtime architecture and its awake-mode fallback.
 - The existing `settings.json` format, including `data_pull_interval_min`,
   `render_interval_min`, and `power.deep_sleep`.
 - One request attempt per source per deep-sleep wake.
@@ -230,11 +239,13 @@ rebooting forever. Awake-mode fatal behavior is not changed by this project.
 
 ### 9. Safer deployment activation
 
-`deploy.bat` keeps its current compile-all-source behavior and does not remove
-legacy device files. It changes copy order so fonts, bytecode, and optional
-configuration are transferred before `main.py`. The source entry point is the
-last firmware file copied and the board is reset only after every copy
-succeeds.
+`deploy.bat` keeps its current compile-all-source wildcard and does not remove
+legacy device files. Full runtime `app.py` is host-compiled and transferred as
+`app.mpy` with fonts, bytecode, and optional configuration. Tiny source
+`main.py` contains only the documented `import app` boot shim, is the last
+firmware file copied, and the board resets only after every copy succeeds.
+`main.py` is excluded from compilation and any ignored `main.mpy` is excluded
+from support copies.
 
 A failed dependency copy therefore leaves the previously deployed entry point
 in place instead of activating a program whose required modules may be only
@@ -266,7 +277,7 @@ terminal failure, timeout, and watchdog feeding without importing hardware.
 
 ### Deep-sleep orchestration tests
 
-A narrowly scoped fake MicroPython environment imports `main.py` and verifies:
+A narrowly scoped fake MicroPython environment imports runtime `app.py` and verifies:
 
 - WDT construction and Wi-Fi STA initialization precede the framebuffer, which
   in turn precedes RTC, NTP, API, render, and EPD work;
@@ -285,8 +296,10 @@ A narrowly scoped fake MicroPython environment imports `main.py` and verifies:
   compatible previous frame. Future weather/NTP timestamps make their own work
   immediately due.
 
-A source-level deployment test verifies that `main.py` is copied after every
-supporting artifact.
+Source-level entrypoint/deployment tests verify that `main.py` is a tiny
+`import app` shim, `app.py` participates in host bytecode compilation,
+`app.mpy` support copying precedes activation, `main.py` is copied after every
+supporting artifact, and `main.mpy` never ships.
 
 ### Host verification
 
@@ -297,8 +310,8 @@ Before hardware access:
 .venv\Scripts\python -m mypy src
 ```
 
-Every deployed module is compiled with `mpy-cross`; `main.py` remains source as
-required by MicroPython startup.
+Every runtime module, including `app.py`, is compiled with `mpy-cross`; only the
+tiny `main.py` import shim remains source as required by MicroPython startup.
 
 ## Hardware acceptance on COM3
 

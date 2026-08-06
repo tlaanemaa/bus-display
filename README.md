@@ -48,6 +48,12 @@ Deploy:
 deploy.bat COM3
 ```
 
+The deploy builds the full runtime from `src/app.py` into `app.mpy`, copies all
+bytecode/support files, then activates the release by copying the tiny source
+`main.py` shim last. Keeping the 41.9 KB runtime out of on-device source
+compilation is required for Wi-Fi and the 48 KB framebuffer to coexist on the
+PSRAM-less ESP32.
+
 Run the host checks before deploying:
 
 ```
@@ -59,7 +65,7 @@ There is no setup access point. If Wi-Fi credentials are missing or the network 
 
 ## Reliability and required hardware acceptance
 
-Settings and Wi-Fi configuration are validated at their JSON boundaries. In deep-sleep mode the firmware constructs its watchdog, initializes Wi-Fi so the driver can reserve RX buffers, then allocates one framebuffer before RTC/NTP/API/render/panel work. It uses strict versioned retained state and commits a changed frame only after `encode → RTC invalidate → panel refresh/sleep → RTC commit`; unchanged frames do not wake the panel. Wi-Fi is reset per wake, network responses require 2xx status plus the expected JSON envelope and are always closed, and unexpected deep-sleep errors clear retained state before a bounded 60-second retry.
+Settings and Wi-Fi configuration are validated at their JSON boundaries. In deep-sleep mode the precompiled `app.mpy` runtime constructs its watchdog, initializes Wi-Fi so the driver can reserve RX buffers, then allocates one framebuffer before RTC/NTP/API/render/panel work. It uses strict versioned retained state and commits a changed frame only after `encode → strict candidate decode → RTC invalidate → panel refresh/sleep → RTC commit`; unchanged frames do not wake the panel. Wi-Fi is reset per wake, network responses require 2xx status plus the expected JSON envelope and are always closed, and unexpected deep-sleep errors clear retained state before a bounded 60-second retry.
 
 The reliability changes are host-verified; COM3 acceptance remains required before merge. Run the following without printing private settings or credentials:
 
@@ -75,7 +81,7 @@ Observe at least five minute-boundary wakes in serial and have the owner confirm
 ## Repo layout
 
 ```
-src/      device filesystem root (MicroPython code + vendored lib/)
+src/      device filesystem root (`main.py` shim + `app.py` runtime + support)
 tests/    pytest, runs on host CPython
 tools/    host-side scripts (hardware bring-up, one-off experiments)
 ```

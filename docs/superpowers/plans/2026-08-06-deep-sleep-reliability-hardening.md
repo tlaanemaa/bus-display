@@ -4,7 +4,7 @@
 
 **Goal:** Harden the existing `main` deep-sleep path so every validly configured wake either presents honest current/error state and schedules the next wake, or enters bounded automatic recovery without risking an invalid differential refresh.
 
-**Architecture:** Preserve the current dual-mode `main.py`, display representation, configuration format, and EPD driver. Add validation at existing boundaries, make RTC persistence transactional around changed panel frames, establish the hardware-confirmed WDT -> Wi-Fi -> framebuffer setup order only in the deep-sleep path, and keep all expected network failures inside the current stale/error display policy.
+**Architecture:** Preserve the current dual-mode runtime, display representation, configuration format, and EPD driver. The runtime lives in host-precompiled `app.py`; tiny source `main.py` remains the activation-last MicroPython entrypoint and imports `app`. Add validation at existing boundaries, make RTC persistence transactional around changed panel frames, establish the hardware-confirmed WDT -> Wi-Fi -> framebuffer setup order only in the deep-sleep path, and keep all expected network failures inside the current stale/error display policy.
 
 > Hardware correction (2026-08-06): the initial plan below placed the
 > framebuffer before Wi-Fi. COM3 disproved that order: it left 4/10 expected RX
@@ -21,7 +21,7 @@
 - Allocate exactly one 48,000-byte framebuffer per deep-sleep wake and reuse it for both differential planes.
 - Keep one API attempt per source per deep-sleep wake and plain HTTP for both public, keyless endpoints.
 - Runtime annotations use built-ins and quoted expressions; typing-only imports stay under `if False:`.
-- Every changed first-party module must pass mypy and `mpy-cross`; `main.py` remains source on the device.
+- Every changed first-party module must pass mypy and `mpy-cross`; `app.py` ships as bytecode while the tiny `main.py` activation shim remains source on the device.
 - Do not merge to `main` until COM3 serial verification and owner visual confirmation pass.
 
 ---
@@ -37,7 +37,7 @@
 - Produces `settings.SettingsError(ValueError)`.
 - Produces `settings.validate(raw: object) -> dict[str, Any]` while preserving legacy keys and defaults.
 - Produces `config.ConfigError(ValueError)` and `config.validate(raw: object) -> dict[str, Any]`.
-- Keeps `settings.load()` and `config.load()` return shapes consumed by current `main.py` and `server.py`.
+- Keeps `settings.load()` and `config.load()` return shapes consumed by current `app.py` and `server.py`.
 
 - [ ] **Step 1: Write failing settings/configuration tests**
 
@@ -162,14 +162,14 @@ git commit -m "fix: validate runtime configuration safely"
 
 **Files:**
 - Modify: `src/retained.py`
-- Modify: `src/main.py`
+- Modify: `src/app.py`
 - Modify: `tests/test_retained.py`
 
 **Interfaces:**
 - Produces `retained.STATE_VERSION = 2` and `retained.RENDER_REVISION = 1`.
 - Produces `retained.settings_fingerprint(cfg: dict[str, Any]) -> str`.
 - Changes `retained.decode(raw: bytes, expected_fingerprint: str, expected_sections: int) -> dict[str, Any] | None`.
-- Changes `_rtc_state_load(cfg)` and `_rtc_state_save(state, cfg)` call sites in `main.py` to supply compatibility context. Task 4 then replaces the save helper with byte-oriented `_rtc_state_commit(raw, cfg)` for transactional ordering.
+- Changes `_rtc_state_load(cfg)` and `_rtc_state_save(state, cfg)` call sites in `app.py` to supply compatibility context. Task 4 then replaces the save helper with byte-oriented `_rtc_state_commit(raw, cfg)` for transactional ordering.
 - Keeps the current retained frame list shape `[sections, footer, status]`.
 
 - [ ] **Step 1: Replace retained fixtures with the versioned compatible shape**
@@ -280,7 +280,7 @@ Update main's next state with `v`, `render_rev`, and `settings`. Pass current co
 ```text
 .venv\Scripts\python -m pytest tests/test_retained.py tests/test_display.py -v
 .venv\Scripts\python -m pytest -q
-.venv\Scripts\python -m mypy src/retained.py src/main.py
+.venv\Scripts\python -m mypy src/retained.py src/app.py
 .venv\Scripts\python -m mpy_cross src/retained.py
 ```
 
@@ -289,7 +289,7 @@ Expected: all commands exit 0 and encoded maximum real frame fixtures remain bel
 - [ ] **Step 5: Commit retained compatibility**
 
 ```text
-git add src/retained.py src/main.py tests/test_retained.py
+git add src/retained.py src/app.py tests/test_retained.py
 git commit -m "fix: validate retained display state"
 ```
 
@@ -404,7 +404,7 @@ git commit -m "fix: make network failures explicit"
 
 **Files:**
 - Create: `tests/test_main_deep_sleep.py`
-- Modify: `src/main.py`
+- Modify: `src/app.py`
 - Modify: `src/wake_schedule.py`
 - Modify: `src/weather.py`
 - Modify: `tests/test_wake_schedule.py`
@@ -562,17 +562,18 @@ Integration-closeout amendments from final review:
 .venv\Scripts\python -m pytest tests/test_main_deep_sleep.py tests/test_retained.py tests/test_wake_schedule.py tests/test_weather.py -v
 .venv\Scripts\python -m pytest -q
 .venv\Scripts\python -m mypy src
-.venv\Scripts\python -m mpy_cross src/main.py
+.venv\Scripts\python -m mpy_cross src/app.py
 .venv\Scripts\python -m mpy_cross src/wake_schedule.py
 .venv\Scripts\python -m mpy_cross src/weather.py
 ```
 
-Expected: all commands exit 0. Compiling `main.py` is a host compatibility check only; deployment still copies its source.
+Expected: all commands exit 0. Runtime `app.py` compiles for deployment;
+source `main.py` remains only the tiny activation shim.
 
 - [ ] **Step 6: Commit the transaction and recovery path**
 
 ```text
-git add src/main.py src/wake_schedule.py src/weather.py tests/test_main_deep_sleep.py tests/test_wake_schedule.py tests/test_weather.py
+git add src/app.py src/wake_schedule.py src/weather.py tests/test_main_deep_sleep.py tests/test_wake_schedule.py tests/test_weather.py
 git commit -m "fix: make deep-sleep wakes recover safely"
 ```
 
@@ -664,6 +665,79 @@ git commit -m "chore: harden firmware activation order"
 ```
 
 ---
+
+### Task 5A: Precompile the runtime to preserve the clean boot heap
+
+**Files:**
+- Move unchanged runtime: `src/main.py` -> `src/app.py`
+- Create: `src/main.py`
+- Modify: `tests/test_main_deep_sleep.py`
+- Modify: `tests/test_deploy.py`
+- Modify: `pyproject.toml`
+- Modify: `deploy.bat`
+- Modify: `AGENTS.md`
+- Modify: `README.md`
+- Modify: `docs/superpowers/specs/2026-08-06-deep-sleep-reliability-hardening-design.md`
+
+**Interfaces:**
+- `src/main.py` is a tiny source boot shim containing `import app`.
+- `src/app.py` contains the existing runtime unchanged and is compiled by the
+  existing top-level `*.py` wildcard into `app.mpy`.
+- Support bytecode, including `app.mpy`, is copied before source `main.py`;
+  `main.mpy` is neither compiled nor shipped.
+
+- [ ] **Step 1: Add packaging and real-runtime RED tests**
+
+Update the fake-hardware harness to import `src/app.py`. Add source/deployment
+assertions that `main.py` is tiny and imports `app`, `app.py` participates in
+the compile wildcard, support `.mpy` copies precede `:main.py`, and the existing
+`main.mpy` exclusions remain in both compile and copy paths.
+
+- [ ] **Step 2: Run the focused tests and verify RED**
+
+```text
+.venv\Scripts\python -m pytest tests/test_main_deep_sleep.py tests/test_deploy.py -q
+```
+
+Expected: fail because `src/app.py` does not exist and source `main.py` is the
+full runtime rather than a tiny `import app` shim.
+
+- [ ] **Step 3: Move runtime bytes unchanged and add the shim**
+
+Move `src/main.py` to `src/app.py` without editing its contents. Create a tiny
+`src/main.py` whose concise comment records that importing the precompiled
+runtime avoids fragmenting the heap before Wi-Fi plus the 48 KB framebuffer.
+Its only executable statement is:
+
+```python
+import app
+```
+
+- [ ] **Step 4: Update typing, deployment comments, and architecture docs**
+
+Keep mypy's `files = ["src"]` coverage and document that it includes both the
+shim and runtime. Update deploy comments (not its proven wildcard/activation
+mechanics), AGENTS, README, design, and this plan so all runtime references use
+`app.py`, while `main.py` remains source and activation-last.
+
+- [ ] **Step 5: Verify host behavior and packaging**
+
+```text
+.venv\Scripts\python -m pytest -q
+.venv\Scripts\python -m mypy src
+.venv\Scripts\python -m mpy_cross src/app.py
+.venv\Scripts\python -m mpy_cross src/main.py
+git diff --check
+```
+
+Expected: all pass; mypy checks 16 first-party modules. Do not touch COM3 in
+this task.
+
+- [ ] **Step 6: Commit**
+
+```text
+git commit -m "fix: precompile firmware runtime for heap safety"
+```
 
 ### Task 6: Final host audit and COM3 hardware acceptance
 

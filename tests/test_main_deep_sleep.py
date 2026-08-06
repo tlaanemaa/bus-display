@@ -1,6 +1,6 @@
 """Deep-sleep orchestration tests with deterministic fake hardware.
 
-The real ``main.py`` module is imported for every test while only its hardware
+The real ``app.py`` runtime is imported for every test while only its hardware
 boundaries are replaced. Import-time ``asyncio.run`` is blocked, then the real
 coroutines/helpers are exercised explicitly. ``monkeypatch`` restores every
 ``sys.modules`` entry so fake ESP32 modules cannot leak into the host suite.
@@ -225,8 +225,8 @@ def app(monkeypatch):
 
     real_asyncio_run = asyncio.run
     monkeypatch.setattr(asyncio, "run", block_import_run)
-    module_name = "_task4_main_%d" % id(events)
-    spec = importlib.util.spec_from_file_location(module_name, SRC / "main.py")
+    module_name = "_task4_app_%d" % id(events)
+    spec = importlib.util.spec_from_file_location(module_name, SRC / "app.py")
     assert spec is not None and spec.loader is not None
     main = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(main)
