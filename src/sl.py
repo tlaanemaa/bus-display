@@ -57,12 +57,17 @@ def fetch_departures(
         try:
             resp = requests.get(url, timeout=timeout_s)
             try:
-                return resp.json()
+                if not 200 <= resp.status_code < 300:
+                    raise OSError("SL HTTP status %s" % resp.status_code)
+                data = resp.json()
+                if not isinstance(data, dict) or not isinstance(data.get("departures"), list):
+                    raise ValueError("SL response has invalid departures shape")
+                return data
             finally:
                 resp.close()
         except Exception as e:
             last_err = e
-            print("sl: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
+            print("sl: fetch attempt %d/%d failed" % (attempt + 1, retries))
             if attempt < retries - 1:
                 time.sleep(RETRY_DELAY_S)
     assert last_err is not None

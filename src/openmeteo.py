@@ -56,12 +56,19 @@ def fetch_today(
         try:
             resp = requests.get(url, timeout=timeout_s)
             try:
-                return resp.json()
+                if not 200 <= resp.status_code < 300:
+                    raise OSError("Open-Meteo HTTP status %s" % resp.status_code)
+                data = resp.json()
+                if (not isinstance(data, dict)
+                        or not isinstance(data.get("daily"), dict)
+                        or not isinstance(data.get("hourly"), dict)):
+                    raise ValueError("Open-Meteo response has invalid forecast shape")
+                return data
             finally:
                 resp.close()
         except Exception as e:
             last_err = e
-            print("openmeteo: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
+            print("openmeteo: fetch attempt %d/%d failed" % (attempt + 1, retries))
             if attempt < retries - 1:
                 time.sleep(RETRY_DELAY_S)
     assert last_err is not None
