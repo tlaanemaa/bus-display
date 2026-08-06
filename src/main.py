@@ -14,16 +14,17 @@ logic & stops" for how to find a site id), then deploy it like any other
 file: `mpremote connect COM3 fs cp src/settings.json :settings.json`.
 
 The 48KB framebuffer is allocated ONCE per boot/wake and kept resident for
-that operating cycle: deep-sleep mode allocates it in main() through
-_allocate_framebuffer(), before RTC/network work; awake mode allocates it in
-display_loop(). It is reused for every refresh -- see AGENTS.md "RAM-vs-HTTPS
-conflict (RESOLVED)". This reverses an earlier design: the framebuffer used to
-be allocated transiently, per cycle, ONLY because a resident buffer starved
-the SL TLS handshake (mbedtls's RSA-2048 cert verification needs a large
-contiguous block). Now that SL and Open-Meteo are fetched over plain HTTP (no
-TLS handshake at all), that pressure is gone -- and a resident buffer is also
-more robust, since a fresh 48KB alloc had begun to MemoryError on later cycles
-as the heap fragmented (MicroPython's GC never compacts).
+that operating cycle. In deep-sleep mode main() constructs the WDT and lets the
+Wi-Fi driver reserve its RX buffers first, then calls _allocate_framebuffer()
+before RTC/NTP/API/render/panel work; awake mode allocates in display_loop().
+It is reused for every refresh -- see AGENTS.md "RAM-vs-HTTPS conflict
+(RESOLVED)". This reverses an earlier design: the framebuffer used to be
+allocated transiently, per cycle, ONLY because a resident buffer starved the
+SL TLS handshake (mbedtls's RSA-2048 cert verification needs a large contiguous
+block). Now that SL and Open-Meteo are fetched over plain HTTP (no TLS handshake
+at all), that pressure is gone -- and a resident buffer is also more robust,
+since a fresh 48KB alloc had begun to MemoryError on later cycles as the heap
+fragmented (MicroPython's GC never compacts).
 
 The legacy Microdot setup server is not imported or used. It remains in
 the tree only as known cleanup debt; importing it would build an unused
@@ -271,7 +272,7 @@ def _rtc_state_load(cfg: "dict[str, Any]") -> "dict[str, Any] | None":
 
 
 def _allocate_framebuffer() -> "tuple[bytearray, Any]":
-    """Reserve the wake's only full framebuffer while the heap is clean."""
+    """Reserve the wake's only full buffer after STA, before remaining work."""
     gc.collect()
     fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
     fb = framebuf.FrameBuffer(
@@ -758,19 +759,22 @@ async def main() -> None:
 
     if deep_sleep:
         try:
-            # Reserve the only 48 KB framebuffer on the clean boot heap before
-            # RTC decoding or network work can fragment it. The same WDT and
-            # framebuffer identities are owned for this entire wake.
-            fb_buf, fb = _allocate_framebuffer()
+            # The ESP32 Wi-Fi driver must reserve its RX buffers before our
+            # resident 48 KB framebuffer takes the largest clean heap region.
+            # The watchdog exists first so STA polling is covered from boot.
             wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
-            state = _rtc_state_load(cfg)
-            request_epoch = wake_schedule.request_boundary(time.time(), 60)
-
             connected = False
             if wifi_cfg and wifi_cfg.get("ssid"):
                 connected = wifi.connect_sta(
                     wifi_cfg["ssid"], wifi_cfg.get("password", ""), wdt=wdt,
                 )
+
+            # Allocate exactly one framebuffer after STA initialization, but
+            # still before RTC decoding, NTP, API requests, rendering, or EPD
+            # construction can fragment the remaining heap.
+            fb_buf, fb = _allocate_framebuffer()
+            state = _rtc_state_load(cfg)
+            request_epoch = wake_schedule.request_boundary(time.time(), 60)
 
             # A cold boot has no trustworthy retained wall clock. Sync once
             # before choosing its first request boundary; normal retained

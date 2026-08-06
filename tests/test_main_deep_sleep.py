@@ -247,6 +247,7 @@ def app(monkeypatch):
     draw_calls = []
 
     def draw_home(fb, sections, footer, status=None, log=True):
+        events.append("render")
         frame = [sections, footer, status]
         draw_calls.append((fb, frame, log))
         if log:
@@ -286,7 +287,7 @@ def app(monkeypatch):
         visible_logs=visible_logs, encoded=encoded,
         DeepSleepCalled=DeepSleepCalled, cfg=cfg,
         state_unchanged=state_unchanged, wifi_wdt=None, fetch_wdt=None,
-        patch=monkeypatch,
+        fail_wifi_if_framebuffer=False, patch=monkeypatch,
     )
 
     def resources():
@@ -332,11 +333,14 @@ def app(monkeypatch):
         def connect_sta(_ssid, _password, timeout_ms=15_000, wdt=None):
             events.append("wifi-connect")
             namespace.wifi_wdt = wdt
+            if namespace.fail_wifi_if_framebuffer and "framebuffer" in events:
+                raise OSError("WiFi Out of Memory")
             return True
 
         monkeypatch.setattr(main.wifi, "connect_sta", connect_sta)
 
         def fetch(cfg, retries=1, wdt=None):
+            events.append("fetch")
             namespace.fetch_wdt = wdt
             return [[]]
 
@@ -388,18 +392,22 @@ def test_unchanged_frame_commits_without_constructing_panel(app):
     assert "rtc-empty" not in app.events
 
 
-def test_deep_sleep_boot_reserves_resources_before_rtc_wifi_ntp_or_epd(app):
+def test_deep_sleep_boot_starts_wifi_before_reserving_framebuffer(app):
+    # Hardware regression: ESP32 STA initialization needs its RX buffers before
+    # the resident 48 KB framebuffer takes the largest clean heap region.
+    app.fail_wifi_if_framebuffer = True
     app.run_main_once()
     allocation = app.events.index("framebuffer")
     watchdog = app.events.index("wdt-construct")
-    assert allocation < watchdog
-    for later in ("rtc-read", "wifi-connect", "ntp", "epd-construct"):
+    wifi_connect = app.events.index("wifi-connect")
+    assert watchdog < wifi_connect < allocation
+    for later in ("rtc-read", "ntp", "fetch", "render", "epd-construct"):
         assert allocation < app.events.index(later)
-        assert watchdog < app.events.index(later)
     assert app.framebuf.sizes == [48_000]
     assert len(app.machine.wdts) == 1
     assert app.wifi_wdt is app.machine.wdts[-1]
     assert app.fetch_wdt is app.wifi_wdt
+    assert 60_000 not in app.machine.deepsleep_calls
 
 
 def test_rtc_invalidation_verifies_the_clear(app):

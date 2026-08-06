@@ -59,7 +59,7 @@ There is no setup access point. If Wi-Fi credentials are missing or the network 
 
 ## Reliability and required hardware acceptance
 
-Settings and Wi-Fi configuration are validated at their JSON boundaries. In deep-sleep mode the firmware reserves one framebuffer before RTC/network work, uses strict versioned retained state, and commits a changed frame only after `encode → RTC invalidate → panel refresh/sleep → RTC commit`; unchanged frames do not wake the panel. Wi-Fi is reset per wake, network responses require 2xx status plus the expected JSON envelope and are always closed, and unexpected deep-sleep errors clear retained state before a bounded 60-second retry.
+Settings and Wi-Fi configuration are validated at their JSON boundaries. In deep-sleep mode the firmware constructs its watchdog, initializes Wi-Fi so the driver can reserve RX buffers, then allocates one framebuffer before RTC/NTP/API/render/panel work. It uses strict versioned retained state and commits a changed frame only after `encode → RTC invalidate → panel refresh/sleep → RTC commit`; unchanged frames do not wake the panel. Wi-Fi is reset per wake, network responses require 2xx status plus the expected JSON envelope and are always closed, and unexpected deep-sleep errors clear retained state before a bounded 60-second retry.
 
 The reliability changes are host-verified; COM3 acceptance remains required before merge. Run the following without printing private settings or credentials:
 
