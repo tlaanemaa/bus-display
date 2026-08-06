@@ -1,5 +1,5 @@
 """Host-side tests for display.py. A tiny fake buffer stands in for the
-physical framebuf.FrameBuffer main.py would pass in (display.py only
+physical framebuf.FrameBuffer app.py would pass in (display.py only
 calls fb.fill()/fill_rect()/pixel() on it); conftest.py separately fakes
 the `framebuf` module itself, since display.py's scaled built-in font
 needs one for its own internal scratch buffer (AGENTS.md "Testability
@@ -57,7 +57,7 @@ def test_stop_section_splits_hero_and_truncates_destination():
     assert section["hero_unit"] == "min"
     assert section["badge_line"] == "474"
     assert section["dest"] == "Slussen"
-    assert section["rows"] == [("440", "Slussen", "12 min"), ("425", "Nacka", "19 min")]
+    assert section["rows"] == [["440", "Slussen", "12 min"], ["425", "Nacka", "19 min"]]
 
 
 def test_stop_section_no_departures_skips_hero():
@@ -156,3 +156,14 @@ def test_draw_home_shows_wifi_error_and_still_fits():
     fb = FakeFB(display.PHYS_W, display.PHYS_H)
     content_bottom, footer_top = display.draw_home(fb, sections, footer, display.WIFI_ERROR)
     assert content_bottom <= footer_top
+
+
+def test_draw_home_can_render_a_plane_without_logging_it_as_visible(capsys):
+    sections = [display.stop_section("Rosenmalm", [])]
+    footer = display.footer_lines("Tor 6 aug", "12:00")
+    fb = FakeFB(display.PHYS_W, display.PHYS_H)
+
+    display.draw_home(fb, sections, footer, log=False)
+
+    assert "display: home screen" not in capsys.readouterr().out
+    assert fb.set_pixels

@@ -1,6 +1,14 @@
 """Pure wall-clock scheduling for one-cycle deep-sleep operation."""
 
 
+def elapsed_due(
+    now_s: float, previous_s: "float | None", interval_s: int,
+) -> bool:
+    """Whether an elapsed-time action is due, including invalid future state."""
+    return (previous_s is None or previous_s > now_s
+            or now_s - previous_s >= interval_s)
+
+
 def request_boundary(now_s: float, interval_s: int = 60) -> int:
     """Current boundary if exactly on it, otherwise the next one."""
     now_s = int(now_s)

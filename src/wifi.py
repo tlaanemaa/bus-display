@@ -6,20 +6,31 @@ until the deprecated onboarding flow is removed.
 import network
 import time
 
+if False:
+    from typing import Any
+
 AP_SSID = "BusDisplay-Setup"
 STA_TIMEOUT_MS = 15000
 
 
 def connect_sta(
     ssid: str, password: str, timeout_ms: int = STA_TIMEOUT_MS,
+    wdt: "Any | None" = None,
 ) -> bool:
     """Try to join `ssid`. Returns True on success, False on timeout."""
     sta = network.WLAN(network.STA_IF)
+    sta.active(False)
+    time.sleep_ms(100)
     sta.active(True)
     sta.connect(ssid, password)
 
     start = time.ticks_ms()
     while not sta.isconnected():
+        if wdt is not None:
+            wdt.feed()
+        if sta.status() < 0:
+            print("wifi: STA connect to", ssid, "failed")
+            return False
         if time.ticks_diff(time.ticks_ms(), start) > timeout_ms:
             print("wifi: STA connect to", ssid, "timed out")
             return False
@@ -46,10 +57,6 @@ def reconnect(
     if sta.isconnected():
         return True
     print("wifi: link down -- reconnecting to", ssid)
-    try:
-        sta.active(False)
-    except Exception:
-        pass
     return connect_sta(ssid, password, timeout_ms)
 
 

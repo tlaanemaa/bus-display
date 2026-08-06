@@ -91,10 +91,10 @@ def test_parse_extracts_forecast_date_for_staleness_check():
     # kept last-good reading is still today's vs. from a prior day.
     w = weather.parse_weather(_raw(_all_day(0)))
     assert w["date"] == "2026-07-12"
-    # Missing time array -> date None (caller treats that as not-today).
+    # Missing time array cannot produce a retained-valid reading.
     raw = _raw(_all_day(0))
     del raw["daily"]["time"]
-    assert weather.parse_weather(raw)["date"] is None
+    assert weather.parse_weather(raw) is None
 
 
 def test_rain_intensity_buckets():
@@ -139,6 +139,16 @@ def test_parse_precip_optional():
     assert w["precip"] is None
 
 
+def test_parse_rejects_values_that_retained_state_cannot_validate():
+    invalid_date = _raw(_all_day(0, 10))
+    invalid_date["daily"]["time"] = [7]
+    assert weather.parse_weather(invalid_date) is None
+
+    for precip in (-1, 101):
+        invalid_precip = _raw(_all_day(0, precip))
+        assert weather.parse_weather(invalid_precip) is None
+
+
 def test_is_for_today_keeps_todays_reading_only():
     today = "2026-07-12"
     reading = weather.parse_weather(_raw(_all_day(0)))   # date 2026-07-12
@@ -168,6 +178,16 @@ def test_keep_last_good_requires_today_and_fresh():
     # No prior good fetch (age None) or no reading -> not usable.
     assert weather.keep_last_good(reading, today, None, cap) is False
     assert weather.keep_last_good(None, today, 60, cap) is False
+
+
+def test_keep_last_good_rejects_future_fetch_timestamp():
+    reading = {
+        "date": "2026-08-06", "condition": "clear",
+        "tmin": 10, "tmax": 20, "precip": 0,
+    }
+    assert weather.keep_last_good(
+        reading, "2026-08-06", -1, 180 * 60,
+    ) is False
 
 
 def test_format_temps_low_first():

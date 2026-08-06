@@ -1,6 +1,8 @@
 [tool.mypy]
 python_version = "3.12"
 files = ["src"]
+# Covers both the tiny source boot shim (main.py) and the host-precompiled
+# runtime source (app.py); vendored lib remains excluded below.
 exclude = ["src[\\\\/]lib[\\\\/]"]
 mypy_path = ["typings"]
 disallow_untyped_defs = true

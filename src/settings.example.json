@@ -11,7 +11,7 @@
   "full_refresh_interval_min": 60,
   "power": {
     "deep_sleep": true,
-    "wake_advance_s": 3
+    "wake_advance_s": 5
   },
   "weather": {
     "enabled": true,

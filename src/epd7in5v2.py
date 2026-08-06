@@ -152,7 +152,7 @@ class EPD7in5V2:
         the correct previous image on 0x10 explicitly, so the differential
         has a valid reference regardless of what reset left behind. This
         replaces the earlier "init_part() once per run, keep panel awake"
-        approach -- see partial_old() and main.py's _draw_and_refresh()."""
+        approach -- see partial_old() and app.py's _draw_and_refresh()."""
         self._reset()
         self._command(0x00)  # panel setting
         self._data_byte(0x1F)
@@ -213,7 +213,7 @@ class EPD7in5V2:
     #
     # Enter partial mode with init_part() (once, right before this sequence),
     # then: partial_begin() -> partial_old(old_buf) -> partial_new(new_buf).
-    # main.py's _draw_and_refresh() drives this and sleeps the panel after.
+    # app.py's _draw_and_refresh() drives this and sleeps the panel after.
 
     def partial_begin(self) -> None:
         """Set the partial-mode VCOM/data interval and select the full-frame

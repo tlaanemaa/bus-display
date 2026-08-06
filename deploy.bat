@@ -9,12 +9,12 @@ rem   e.g.    deploy.bat            (auto-detects the connected device)
 rem           deploy.bat COM5       (force a specific port)
 rem
 rem COMPILES every module to .mpy on the host (mpy-cross), then copies the
-rem bytecode + main.py + settings.json + fonts to the device (src\ maps 1:1 to
+rem bytecode + tiny main.py shim + settings.json + fonts to the device (src\ maps 1:1 to
 rem the device filesystem root). Compiling on the host, not the device, is
 rem load-bearing on this PSRAM-less board -- on-device compilation fragments
-rem the heap and starves the TLS fetch (see the compile section below and
-rem AGENTS.md "RAM-vs-HTTPS conflict"). A full copy of the handful of small
-rem files takes a couple of seconds and is harmless to flash.
+rem the heap: the 41.9 KB runtime source made Wi-Fi plus the 48 KB framebuffer
+rem mutually exclusive (see the compile section below and AGENTS.md). A full
+rem copy of the handful of small files takes a couple of seconds and is harmless to flash.
 rem
 rem Requires mpy-cross:  pip install mpy-cross
 rem Close any open REPL / serial monitor first -- only one process can hold the
@@ -58,12 +58,12 @@ rem largest contiguous free block collapses (confirmed on hardware adding
 rem weather: the first fetch hung every boot until these were precompiled; the
 rem contiguous free block jumped ~32KB -> ~90KB -- see AGENTS.md "RAM-vs-HTTPS
 rem conflict"). Doing it here means an edit to any .py can NEVER ship as a
-rem stale .mpy, and the device never compiles anything but main.py. Needs
+rem stale .mpy, and the device compiles only the tiny main.py shim. Needs
 rem mpy-cross (pip install mpy-cross).
 rem
-rem main.py is the ONE exception -- MicroPython auto-runs :main.py by name (no
-rem main.mpy is ever run), so it ships as source and is compiled on-device.
-rem It's small; with everything else precompiled there's ample contiguous RAM.
+rem main.py is the ONE source exception -- MicroPython auto-runs :main.py by
+rem name (no main.mpy is ever run). It is only a tiny `import app` shim; the
+rem complete runtime is app.py, compiled here and shipped as app.mpy.
 for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
     if /I not "%%~nxF"=="main.py" (
         echo   compile %%~nF.mpy
@@ -77,16 +77,18 @@ for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
 
 echo Deploying to %PORTDESC% ...
 
-rem --- top-level files: main.py (source), the compiled modules, settings ---
-rem Only the .mpy go to the device -- NOT the .py (except main.py). Shipping
-rem the source too would be inert dead flash (MicroPython always prefers the
-rem .mpy) and just invites confusion about which one runs. settings.example.json
-rem is a repo-only template -- the device needs the real settings.json only.
-for %%F in ("%SRCDIR%\main.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
+rem --- top-level support files: compiled modules and settings ----------------
+rem Only the .mpy go to the device -- NOT the .py (except the tiny main.py shim,
+rem activated last below). Shipping source alongside bytecode would be inert dead flash
+rem and invites confusion about which one runs. settings.example.json is a
+rem repo-only template -- the device needs the real settings.json only.
+for %%F in ("%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
     if /I not "%%~nxF"=="settings.example.json" (
-        echo   cp %%~nxF
-        %MP% %CONN% fs cp "%%F" ":%%~nxF"
-        if errorlevel 1 goto :fail
+        if /I not "%%~nxF"=="main.mpy" (
+            echo   cp %%~nxF
+            %MP% %CONN% fs cp "%%F" ":%%~nxF"
+            if errorlevel 1 goto :fail
+        )
     )
 )
 
@@ -108,6 +110,11 @@ for %%F in ("%SRCDIR%\fonts\*.fnt") do (
     %MP% %CONN% fs cp "%%F" ":fonts/%%~nxF"
     if errorlevel 1 goto :fail
 )
+
+rem --- activate new firmware only after app.mpy and all support files copied -
+echo   cp main.py
+%MP% %CONN% fs cp "%SRCDIR%\main.py" ":main.py"
+if errorlevel 1 goto :fail
 
 echo Resetting %PORTDESC% ...
 %MP% %CONN% reset
