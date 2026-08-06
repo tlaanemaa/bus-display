@@ -250,9 +250,11 @@ async def _wait_until_epoch(wdt: "Any", target_epoch: int) -> None:
         await asyncio.sleep(remaining if remaining < _WDT_FEED_CHUNK_S else _WDT_FEED_CHUNK_S)
 
 
-def _rtc_state_load() -> "dict[str, Any] | None":
+def _rtc_state_load(cfg: "dict[str, Any]") -> "dict[str, Any] | None":
     raw = machine.RTC().memory()
-    state = retained.decode(raw)
+    state = retained.decode(
+        raw, retained.settings_fingerprint(cfg), len(cfg["stops"]),
+    )
     if state is None:
         reason = "empty" if not raw else "invalid/corrupt/incompatible"
         print("retained: %s (%d bytes) -- next refresh must be full" % (reason, len(raw)))
@@ -261,7 +263,7 @@ def _rtc_state_load() -> "dict[str, Any] | None":
     return state
 
 
-def _rtc_state_save(state: "dict[str, Any]") -> None:
+def _rtc_state_save(state: "dict[str, Any]", cfg: "dict[str, Any]") -> None:
     """Write and read back before sleeping; never silently trust retention."""
     raw = retained.encode(state)
     rtc = machine.RTC()
@@ -271,7 +273,9 @@ def _rtc_state_save(state: "dict[str, Any]") -> None:
     # Do not compare decoded JSON to the live Python object: display rows are
     # tuples while JSON canonically restores arrays as lists, so semantically
     # identical state would falsely fail an object-equality check.
-    if readback != raw or retained.decode(readback) is None:
+    if (readback != raw or retained.decode(
+            readback, retained.settings_fingerprint(cfg), len(cfg["stops"]),
+    ) is None):
         raise OSError("RTC retained-state readback mismatch")
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
 
@@ -401,11 +405,14 @@ async def deep_sleep_cycle(
         print("power: content unchanged -- no panel refresh")
 
     next_state = {
-        "v": 1, "frame": frame, "last_full": last_full_epoch,
+        "v": retained.STATE_VERSION,
+        "render_rev": retained.RENDER_REVISION,
+        "settings": retained.settings_fingerprint(cfg),
+        "frame": frame, "last_full": last_full_epoch,
         "weather": last_weather, "weather_time": last_weather_time,
         "weather_bucket": last_weather_bucket, "last_ntp": last_ntp_epoch,
     }
-    _rtc_state_save(next_state)
+    _rtc_state_save(next_state, cfg)
 
     advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
     delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)
@@ -693,7 +700,7 @@ async def main() -> None:
     power_cfg = cfg.get("power", {})
     deep_sleep = power_cfg.get("deep_sleep", False)
     wake_advance_s = power_cfg.get("wake_advance_s", 3)
-    state = _rtc_state_load() if deep_sleep else None
+    state = _rtc_state_load(cfg) if deep_sleep else None
     request_epoch = wake_schedule.request_boundary(time.time(), 60)
     wifi_cfg = config.load().get("wifi")
 
