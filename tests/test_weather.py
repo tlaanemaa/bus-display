@@ -170,6 +170,16 @@ def test_keep_last_good_requires_today_and_fresh():
     assert weather.keep_last_good(None, today, 60, cap) is False
 
 
+def test_keep_last_good_rejects_future_fetch_timestamp():
+    reading = {
+        "date": "2026-08-06", "condition": "clear",
+        "tmin": 10, "tmax": 20, "precip": 0,
+    }
+    assert weather.keep_last_good(
+        reading, "2026-08-06", -1, 180 * 60,
+    ) is False
+
+
 def test_format_temps_low_first():
     w = {"condition": "rain", "tmin": 6, "tmax": 12, "precip": 60}
     assert weather.format_temps(w) == "6° / 12°"

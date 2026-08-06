@@ -220,7 +220,7 @@ def keep_last_good(
     block's max_age_min (see settings.example.json)."""
     if age_s is None:
         return False
-    return is_for_today(reading, today_iso) and age_s <= max_age_s
+    return is_for_today(reading, today_iso) and 0 <= age_s <= max_age_s
 
 
 def format_temps(weather: "dict[str, Any]") -> str:

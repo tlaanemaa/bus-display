@@ -232,7 +232,11 @@ def _draw_and_refresh(
     try:
         epd.init_part()
         epd.partial_begin()
-        display.draw_home(fb, *prev_frame)   # OLD frame -> 0x10
+        # Spell out the retained frame fields so the optional log flag cannot
+        # be confused with a variadic positional argument by static checking.
+        display.draw_home(
+            fb, prev_frame[0], prev_frame[1], prev_frame[2], log=False,
+        )  # OLD frame -> 0x10; not newly visible
         epd.partial_old(fb_buf)
         display.draw_home(fb, *frame)        # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
         epd.partial_new(fb_buf)
@@ -263,9 +267,27 @@ def _rtc_state_load(cfg: "dict[str, Any]") -> "dict[str, Any] | None":
     return state
 
 
-def _rtc_state_save(state: "dict[str, Any]", cfg: "dict[str, Any]") -> None:
-    """Write and read back before sleeping; never silently trust retention."""
-    raw = retained.encode(state)
+def _allocate_framebuffer() -> "tuple[bytearray, Any]":
+    """Reserve the wake's only full framebuffer while the heap is clean."""
+    gc.collect()
+    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
+    fb = framebuf.FrameBuffer(
+        fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB,
+    )
+    return fb_buf, fb
+
+
+def _rtc_state_invalidate() -> None:
+    """Clear RTC state and verify it cannot authorize a later partial."""
+    rtc = machine.RTC()
+    rtc.memory(b"")
+    if rtc.memory() != b"":
+        raise OSError("RTC retained-state invalidate mismatch")
+    print("retained: invalidated and verified")
+
+
+def _rtc_state_commit(raw: bytes, cfg: "dict[str, Any]") -> None:
+    """Commit the already-encoded state and verify bytes plus strict decode."""
     rtc = machine.RTC()
     rtc.memory(raw)
     readback = rtc.memory()
@@ -278,6 +300,20 @@ def _rtc_state_save(state: "dict[str, Any]", cfg: "dict[str, Any]") -> None:
     ) is None):
         raise OSError("RTC retained-state readback mismatch")
     print("retained: saved and verified %d/%d bytes" % (len(raw), retained.MAX_BYTES))
+
+
+def _recover_deep_sleep(exc: Exception) -> None:
+    """Invalidate differential state and schedule a bounded recovery wake."""
+    print("main: fatal deep-sleep error; retrying in 60 s:")
+    try:
+        sys.print_exception(exc)  # type: ignore[attr-defined]
+    except AttributeError:
+        print(repr(exc))
+    try:
+        _rtc_state_invalidate()
+    except Exception as invalidate_error:
+        print("retained: recovery invalidation failed:", invalidate_error)
+    machine.deepsleep(60_000)
 
 
 def _stale_section(
@@ -297,14 +333,11 @@ async def deep_sleep_cycle(
     state: "dict[str, Any] | None",
     request_epoch: int,
     boot_ticks: int,
+    wdt: "Any",
+    fb: "Any",
+    fb_buf: bytearray,
 ) -> None:
     """One wake -> boundary-aligned fetch/render -> retained state -> sleep."""
-    epd = EPD7in5V2()
-    wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
-    gc.collect()
-    fb_buf = bytearray(_FB_WIDTH * _FB_HEIGHT // 8)
-    fb = framebuf.FrameBuffer(fb_buf, _FB_WIDTH, _FB_HEIGHT, framebuf.MONO_HLSB)
-
     previous_frame = state.get("frame") if state else None
     previous_sections = previous_frame[0] if previous_frame else []
     last_full_epoch = state.get("last_full") if state else None
@@ -346,7 +379,9 @@ async def deep_sleep_cycle(
     if weather_enabled and connected and isinstance(weather_cfg, dict):
         weather_interval_s = weather_cfg.get("pull_interval_min", 30) * 60
         weather_bucket = int(time.time() // weather_interval_s)
-        if last_weather is None or weather_bucket != last_weather_bucket:
+        if wake_schedule.elapsed_due(
+            time.time(), last_weather_time, weather_interval_s,
+        ):
             fetched = None
             try:
                 wdt.feed()
@@ -358,7 +393,7 @@ async def deep_sleep_cycle(
                 print("weather: fetch failed:", e)
             if fetched is not None:
                 last_weather = fetched
-                last_weather_time = time.time()
+                last_weather_time = int(time.time())
                 last_weather_bucket = weather_bucket
                 print("weather: " + weather.summary_text(fetched))
             else:
@@ -373,10 +408,14 @@ async def deep_sleep_cycle(
 
     # RTC survives deep sleep. Resync at most daily, after the boundary so
     # ordinary wakes perform no network request before :00.
-    if connected and (last_ntp_epoch is None or time.time() - last_ntp_epoch >= 24 * 3600):
+    if connected and wake_schedule.elapsed_due(
+        time.time(), last_ntp_epoch, 24 * 3600,
+    ):
         try:
+            wdt.feed()
             ntptime.settime()
-            last_ntp_epoch = time.time()
+            last_ntp_epoch = int(time.time())
+            wdt.feed()
             print("power: NTP resync ok")
         except Exception as e:
             print("power: NTP resync failed:", e)
@@ -394,15 +433,12 @@ async def deep_sleep_cycle(
 
     full_interval_s = cfg.get("full_refresh_interval_min", 60) * 60
     now_epoch = int(time.time())
-    full = (previous_frame is None or last_full_epoch is None
-            or now_epoch - last_full_epoch >= full_interval_s)
-    if frame != previous_frame:
-        print("power: content changed, %s refresh" % ("full" if full else "partial"))
-        _draw_and_refresh(epd, fb, fb_buf, frame, previous_frame, full)
-        if full:
-            last_full_epoch = now_epoch
-    else:
-        print("power: content unchanged -- no panel refresh")
+    full = (previous_frame is None or wake_schedule.elapsed_due(
+        now_epoch, last_full_epoch, full_interval_s,
+    ))
+    content_changed = frame != previous_frame
+    if content_changed and full:
+        last_full_epoch = now_epoch
 
     next_state = {
         "v": retained.STATE_VERSION,
@@ -412,7 +448,17 @@ async def deep_sleep_cycle(
         "weather": last_weather, "weather_time": last_weather_time,
         "weather_bucket": last_weather_bucket, "last_ntp": last_ntp_epoch,
     }
-    _rtc_state_save(next_state, cfg)
+    raw = retained.encode(next_state)
+
+    if content_changed:
+        print("power: content changed, %s refresh" % ("full" if full else "partial"))
+        _rtc_state_invalidate()
+        epd = EPD7in5V2()
+        _draw_and_refresh(epd, fb, fb_buf, frame, previous_frame, full)
+        _rtc_state_commit(raw, cfg)
+    else:
+        print("power: content unchanged -- no panel refresh")
+        _rtc_state_commit(raw, cfg)
 
     advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
     delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)
@@ -696,19 +742,63 @@ async def display_loop(
 
 async def main() -> None:
     boot_ticks = time.ticks_ms()
+    try:
+        print("main: reset cause = %d" % machine.reset_cause())
+    except Exception:
+        pass
+
     cfg = settings.load()
     power_cfg = cfg.get("power", {})
     deep_sleep = power_cfg.get("deep_sleep", False)
     wake_advance_s = power_cfg.get("wake_advance_s", 3)
-    state = _rtc_state_load(cfg) if deep_sleep else None
-    request_epoch = wake_schedule.request_boundary(time.time(), 60)
     wifi_cfg = config.load().get("wifi")
+
+    if deep_sleep:
+        try:
+            # Reserve the only 48 KB framebuffer on the clean boot heap before
+            # RTC decoding or network work can fragment it. The same WDT and
+            # framebuffer identities are owned for this entire wake.
+            fb_buf, fb = _allocate_framebuffer()
+            wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
+            state = _rtc_state_load(cfg)
+            request_epoch = wake_schedule.request_boundary(time.time(), 60)
+
+            connected = False
+            if wifi_cfg and wifi_cfg.get("ssid"):
+                connected = wifi.connect_sta(
+                    wifi_cfg["ssid"], wifi_cfg.get("password", ""), wdt=wdt,
+                )
+
+            # A cold boot has no trustworthy retained wall clock. Sync once
+            # before choosing its first request boundary; normal retained
+            # wakes perform their daily NTP request after the :00 boundary.
+            if connected and state is None:
+                try:
+                    wdt.feed()
+                    ntptime.settime()
+                    print("main: cold-boot NTP sync ok")
+                except Exception as e:
+                    print("main: cold-boot NTP sync failed:", e)
+                finally:
+                    wdt.feed()
+                request_epoch = wake_schedule.request_boundary(time.time(), 60)
+
+            print("main: deep-sleep mode; wake advance = %d s" % wake_advance_s)
+            await deep_sleep_cycle(
+                cfg, wifi_cfg, connected, state, request_epoch, boot_ticks,
+                wdt, fb, fb_buf,
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            _recover_deep_sleep(e)
+        return
 
     connected = False
     if wifi_cfg and wifi_cfg.get("ssid"):
         connected = wifi.connect_sta(wifi_cfg["ssid"], wifi_cfg.get("password", ""))
 
-    if connected and not deep_sleep:
+    if connected:
         try:
             ntptime.settime()
             print("main: NTP sync ok")
@@ -732,21 +822,7 @@ async def main() -> None:
             display.warm_fonts()
         except Exception as e:
             print("main: font warm failed (non-fatal):", e)
-
         await display_loop(cfg, wifi_cfg)
-    elif deep_sleep:
-        # A cold boot has no trustworthy retained wall clock. Sync once before
-        # choosing its first request boundary; normal deep-sleep wakes retain
-        # the RTC and do their daily NTP request only after the :00 boundary.
-        if connected and state is None:
-            try:
-                ntptime.settime()
-                print("main: cold-boot NTP sync ok")
-            except Exception as e:
-                print("main: cold-boot NTP sync failed:", e)
-            request_epoch = wake_schedule.request_boundary(time.time(), 60)
-        print("main: deep-sleep mode; wake advance = %d s" % wake_advance_s)
-        await deep_sleep_cycle(cfg, wifi_cfg, connected, state, request_epoch, boot_ticks)
     else:
         # No captive portal: USB is the configuration path. Keep retrying on
         # subsequent resets/deep-sleep wakes and never silently look current.

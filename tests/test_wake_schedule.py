@@ -1,6 +1,13 @@
 import wake_schedule
 
 
+def test_elapsed_due_handles_missing_expired_and_future_values():
+    assert wake_schedule.elapsed_due(1000, None, 60) is True
+    assert wake_schedule.elapsed_due(1000, 940, 60) is True
+    assert wake_schedule.elapsed_due(1000, 941, 60) is False
+    assert wake_schedule.elapsed_due(1000, 1001, 60) is True
+
+
 def test_request_boundary_is_current_only_when_exact():
     assert wake_schedule.request_boundary(120) == 120
     assert wake_schedule.request_boundary(117) == 120

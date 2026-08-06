@@ -156,3 +156,14 @@ def test_draw_home_shows_wifi_error_and_still_fits():
     fb = FakeFB(display.PHYS_W, display.PHYS_H)
     content_bottom, footer_top = display.draw_home(fb, sections, footer, display.WIFI_ERROR)
     assert content_bottom <= footer_top
+
+
+def test_draw_home_can_render_a_plane_without_logging_it_as_visible(capsys):
+    sections = [display.stop_section("Rosenmalm", [])]
+    footer = display.footer_lines("Tor 6 aug", "12:00")
+    fb = FakeFB(display.PHYS_W, display.PHYS_H)
+
+    display.draw_home(fb, sections, footer, log=False)
+
+    assert "display: home screen" not in capsys.readouterr().out
+    assert fb.set_pixels

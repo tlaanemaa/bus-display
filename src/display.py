@@ -604,6 +604,7 @@ def draw_home(
     sections: "list[dict[str, Any]]",
     footer: "list[str]",
     weather: "dict[str, Any] | str | None" = None,
+    log: bool = True,
 ) -> "tuple[int, int]":
     """Draws each stop's section (from stop_section()) top-to-bottom, then the
     footer (from footer_lines(), plus weather) anchored near the bottom. A
@@ -614,7 +615,8 @@ def draw_home(
     centered date/time (weather disabled). Logs everything to serial
     (AGENTS.md "make the code corroborate the screen"). Returns
     (content_bottom, footer_top) logical-y coordinates so callers/tests can
-    check content didn't grow into the footer."""
+    check content didn't grow into the footer. ``log=False`` is reserved for
+    reconstructing a differential old plane that is not newly visible."""
     f = _fonts()
     hero_f, head_f, row_f = f["hero"], f["head"], f["row"]
 
@@ -707,8 +709,9 @@ def draw_home(
         weather_summary = wx.summary_text(weather)
     else:
         weather_summary = "weather: unavailable"
-    print("display: home screen -- " + " | ".join(logged) + " || "
-          + " | ".join(footer) + " || " + weather_summary)
+    if log:
+        print("display: home screen -- " + " | ".join(logged) + " || "
+              + " | ".join(footer) + " || " + weather_summary)
     # Returned so callers/tests can assert content didn't run into the footer
     # band (the FakeFB in tests only guards the physical buffer bounds).
     return content_bottom, footer_top
