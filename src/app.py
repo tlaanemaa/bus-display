@@ -779,6 +779,13 @@ async def main() -> None:
 
     if deep_sleep:
         try:
+            # Capture the intended request boundary before variable-duration
+            # Wi-Fi setup. A wake at :57 must still target the coming :00 even
+            # if association occasionally completes just after that boundary;
+            # choosing afterward would silently skip to the following minute.
+            # Cold boots recalculate this after NTP below.
+            request_epoch = wake_schedule.request_boundary(time.time(), 60)
+
             # The ESP32 Wi-Fi driver must reserve its RX buffers before our
             # resident 48 KB framebuffer takes the largest clean heap region.
             # The watchdog exists first so STA polling is covered from boot.
@@ -794,7 +801,6 @@ async def main() -> None:
             # construction can fragment the remaining heap.
             fb_buf, fb = _allocate_framebuffer()
             state = _rtc_state_load(cfg)
-            request_epoch = wake_schedule.request_boundary(time.time(), 60)
 
             # A cold boot has no trustworthy retained wall clock. Sync once
             # before choosing its first request boundary; normal retained

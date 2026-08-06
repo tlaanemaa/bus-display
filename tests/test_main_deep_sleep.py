@@ -576,6 +576,29 @@ def test_cold_boot_recalculates_request_boundary_after_ntp_attempt(app, monkeypa
     assert boundary_inputs == [1_001, 1_020]
 
 
+def test_retained_wake_keeps_boundary_chosen_before_slow_wifi(app, monkeypatch):
+    """A :57 wake must still target :00 if Wi-Fi finishes after :00."""
+    captured_request_epochs = []
+
+    app.main.time.time = lambda: (
+        1_077 if "wifi-connect" not in app.events else 1_081
+    )
+    monkeypatch.setattr(
+        app.main, "_rtc_state_load", lambda _cfg: app.state_unchanged,
+    )
+
+    async def capture_cycle(
+        _cfg, _wifi_cfg, _connected, _state, request_epoch, *_resources,
+    ):
+        captured_request_epochs.append(request_epoch)
+
+    monkeypatch.setattr(app.main, "deep_sleep_cycle", capture_cycle)
+
+    app.run_main_once()
+
+    assert captured_request_epochs == [1_080]
+
+
 def test_successful_cold_boot_ntp_is_not_repeated_and_is_retained(app):
     app.run_main_once()
     assert app.events.count("ntp") == 1
