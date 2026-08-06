@@ -66,6 +66,15 @@ def test_old_version_renderer_and_settings_are_rejected():
         assert _decode(retained.encode(state)) is None
 
 
+@pytest.mark.parametrize("key,value", [
+    ("v", 2.0), ("v", True), ("render_rev", 1.0), ("render_rev", True),
+])
+def test_schema_markers_must_be_integers_not_equal_numeric_types(key, value):
+    state = _state()
+    state[key] = value
+    assert _decode(retained.encode(state)) is None
+
+
 def test_stop_reorder_or_identity_change_invalidates_state():
     cfg = _settings()
     cfg["stops"].append({"name": "Slussen", "site_id": 9192})

@@ -125,7 +125,8 @@ def _valid_state(
 ) -> bool:
     if not isinstance(state, dict) or not _has_exact_keys(state, _STATE_KEYS):
         return False
-    if (state["v"] != STATE_VERSION or state["render_rev"] != RENDER_REVISION
+    if (not _is_integer(state["v"]) or not _is_integer(state["render_rev"])
+            or state["v"] != STATE_VERSION or state["render_rev"] != RENDER_REVISION
             or state["settings"] != expected_fingerprint):
         return False
 
