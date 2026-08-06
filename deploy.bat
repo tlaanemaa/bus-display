@@ -84,9 +84,11 @@ rem and invites confusion about which one runs. settings.example.json is a
 rem repo-only template -- the device needs the real settings.json only.
 for %%F in ("%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
     if /I not "%%~nxF"=="settings.example.json" (
-        echo   cp %%~nxF
-        %MP% %CONN% fs cp "%%F" ":%%~nxF"
-        if errorlevel 1 goto :fail
+        if /I not "%%~nxF"=="main.mpy" (
+            echo   cp %%~nxF
+            %MP% %CONN% fs cp "%%F" ":%%~nxF"
+            if errorlevel 1 goto :fail
+        )
     )
 )
 

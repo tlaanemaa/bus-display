@@ -43,3 +43,5 @@ def test_main_is_activated_once_after_support_files_and_before_reset():
     assert '"%SRCDIR%\\*.json"' in inputs
     assert "main.py" not in inputs
     assert '"%SRCDIR%\\*.py"' not in inputs
+    support_body = support_loop.group("body")
+    assert 'if /I not "%%~nxF"=="main.mpy"' in support_body

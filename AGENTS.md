@@ -67,6 +67,8 @@ mypy                                              # static-check every first-par
 
 **The whole app ships as precompiled `.mpy`, not source** (`deploy.bat` runs `mpy-cross` on every `.py`, then copies only the bytecode). This keeps the boot heap clean and unfragmented on this PSRAM-less board: on-device compilation spikes/fragments RAM (parser/AST), which now threatens the resident 48 KB framebuffer's one-time boot allocation (and historically starved the TLS fetch — see "RAM-vs-HTTPS conflict (RESOLVED)"). `main.py` is the ONE exception (MicroPython auto-runs `:main.py` by name; it's small enough to compile on-device with everything else precompiled). `deploy.bat` copies compiled modules, JSON, vendored bytecode, and fonts first, then copies source `main.py` exactly once immediately before reset; every copy is error-checked, so the new `main.py` is not activated until support copies succeed. So a single-file quick-deploy works directly only for `main.py`; for any other module, recompile first (`python -m mpy_cross src/foo.py && mpremote connect COM3 fs cp src/foo.mpy :foo.mpy`) or just run `deploy.bat`. The `.mpy` are **gitignored build artifacts** — `.py` is the source of truth. Requires `pip install mpy-cross`.
 
+`deploy.bat` explicitly skips an ignored `src/main.mpy` that may be left by a host compatibility compile; only source `main.py` is the boot entry point copied to the device.
+
 Only one process can hold the COM port — close any open REPL before deploying. `main.py` auto-runs on boot: unexpected deep-sleep runtime failures use the bounded recovery path, while configuration errors and the awake fallback stay Ctrl-C/REPL-recoverable. Never create a tight reset loop, or the board becomes hard to reflash.
 
 ## Architecture
