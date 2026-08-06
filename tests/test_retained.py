@@ -247,17 +247,31 @@ def test_realistic_two_stop_maximum_frame_fits_rtc_memory():
 
 
 def test_worst_case_accepted_stop_names_and_departure_count_fit_rtc_memory():
+    max_name_chars = settings.MAX_STOP_NAME_CHARS
+    assert max_name_chars == 48
     cfg = settings.validate({
         "stops": [
-            {"name": "\U0001f600" * settings.MAX_STOP_NAME_CHARS, "site_id": 1234},
-            {"name": "\U0001f680" * settings.MAX_STOP_NAME_CHARS, "site_id": 4321},
+            {"name": "\U0001f600" * max_name_chars, "site_id": 1234},
+            {"name": "\U0001f680" * max_name_chars, "site_id": 4321},
         ],
+        "direction_code": 2,
+        "forecast_min": 1200,
         "departures_per_stop": 3,
+        "data_pull_interval_min": 1,
+        "render_interval_min": 1,
+        "full_refresh_interval_min": 1,
         "power": {"deep_sleep": True, "wake_advance_s": 3},
+        "weather": {
+            "enabled": True, "latitude": 90, "longitude": 180,
+            "pull_interval_min": 1, "max_age_min": 1,
+        },
     })
     state = _state(cfg)
     first = state["frame"][0][0]
     first["name"] = cfg["stops"][0]["name"]
+    first["hero_main"] = "1200"
+    first["hero_unit"] = "min"
+    first["badge_line"] = "999"
     first["dest"] = "Stockholm Slussen via centrum"
     first["rows"] = [
         ["474", "Stockholm Slussen via centrum", "119 min"],
@@ -267,9 +281,19 @@ def test_worst_case_accepted_stop_names_and_departure_count_fit_rtc_memory():
     second["name"] = cfg["stops"][1]["name"]
     state["frame"][0].append(second)
     state["frame"][1] = ["Sondag 19 juli", "14:32"]
-    state["frame"][2] = _weather()
-    state["weather"] = _weather()
-    state["weather_time"] = 1784464320
-    state["weather_bucket"] = 99136
-    state["last_ntp"] = 1784460000
-    assert len(retained.encode(state)) < retained.MAX_BYTES
+    maximum_weather = {
+        "date": "9999-12-31", "condition": "rain_heavy",
+        "tmin": -999, "tmax": 999, "precip": 100,
+    }
+    state["frame"][2] = maximum_weather
+    state["last_full"] = 2_147_483_647
+    state["weather"] = maximum_weather
+    state["weather_time"] = 2_147_483_647
+    state["weather_bucket"] = 2_147_483_647
+    state["last_ntp"] = 2_147_483_647
+    encoded = retained.encode(state)
+    assert len(encoded) < retained.MAX_BYTES
+    assert retained.MAX_BYTES - len(encoded) == 73
+    assert retained.decode(
+        encoded, retained.settings_fingerprint(cfg), len(cfg["stops"]),
+    ) is not None

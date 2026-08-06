@@ -210,6 +210,11 @@ Scheduling still uses the current wall-clock minute boundary after Wi-Fi and
 any cold-boot NTP synchronization. Wake delay remains clamped to a future
 minute with the configured advance.
 
+A due retained-wake NTP resync runs after the departures request but before
+weather date/usability checks and footer construction. This guarantees that a
+clock correction across local midnight makes both weather and footer observe
+the same corrected local date.
+
 ### 8. Bounded deep-sleep recovery
 
 Expected source failures produce screen state and continue normally.
@@ -217,6 +222,8 @@ Unexpected exceptions in the deep-sleep path print a traceback, best-effort
 turn off WLAN, invalidate RTC state, and call `machine.deepsleep(60_000)`.
 Any powered panel is already covered by the existing refresh `finally` guard.
 If deep sleep unexpectedly returns, `machine.reset()` is the fallback.
+The ordinary successful-cycle deep-sleep call uses the same reset fallback;
+returning from either sleep request can never fall through into normal code.
 
 Configuration errors retain the current USB-recoverable behavior rather than
 rebooting forever. Awake-mode fatal behavior is not changed by this project.

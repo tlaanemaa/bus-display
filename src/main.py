@@ -380,6 +380,22 @@ async def deep_sleep_cycle(
             old = previous_sections[i] if i < len(previous_sections) else None
             sections.append(_stale_section(stop, old))
 
+    # RTC survives deep sleep. Resync at most daily, after the boundary and
+    # departures request but before any local-date-dependent weather/footer
+    # decisions. An NTP correction can cross midnight; all later status must
+    # observe the corrected date together.
+    if connected and wake_schedule.elapsed_due(
+        time.time(), last_ntp_epoch, 24 * 3600,
+    ):
+        try:
+            wdt.feed()
+            ntptime.settime()
+            last_ntp_epoch = int(time.time())
+            wdt.feed()
+            print("power: NTP resync ok")
+        except Exception as e:
+            print("power: NTP resync failed:", e)
+
     weather_cfg = cfg.get("weather")
     weather_enabled = bool(weather_cfg and weather_cfg.get("enabled", True)
                            and weather_cfg.get("latitude") is not None
@@ -420,20 +436,6 @@ async def deep_sleep_cycle(
         # unavailable, so a reading that crosses midnight/age policy cannot
         # continue appearing beside a live clock as though it were current.
         weather_error = not usable_last_weather
-
-    # RTC survives deep sleep. Resync at most daily, after the boundary so
-    # ordinary wakes perform no network request before :00.
-    if connected and wake_schedule.elapsed_due(
-        time.time(), last_ntp_epoch, 24 * 3600,
-    ):
-        try:
-            wdt.feed()
-            ntptime.settime()
-            last_ntp_epoch = int(time.time())
-            wdt.feed()
-            print("power: NTP resync ok")
-        except Exception as e:
-            print("power: NTP resync failed:", e)
 
     date_str, time_str = _local_now_strings()
     footer = display.footer_lines(date_str, time_str)
@@ -488,6 +490,8 @@ async def deep_sleep_cycle(
     except Exception:
         pass
     machine.deepsleep(delay_s * 1000)
+    # Like fatal recovery, an ordinary deep-sleep request must never return.
+    machine.reset()
 
 
 async def display_loop(

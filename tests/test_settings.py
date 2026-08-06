@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -74,6 +75,13 @@ def test_validate_accepts_stop_name_at_rtc_budget_limit():
     name = "x" * settings.MAX_STOP_NAME_CHARS
     raw["stops"][0]["name"] = name
     assert settings.validate(raw)["stops"][0]["name"] == name
+
+
+def test_committed_example_file_loads_and_validates(monkeypatch):
+    path = Path(__file__).parents[1] / "src" / "settings.example.json"
+    monkeypatch.setattr(settings, "PATH", str(path))
+    loaded = settings.load()
+    assert [len(stop["name"]) for stop in loaded["stops"]] == [42, 42]
 
 
 def test_validate_rejects_nan_weather_coordinates():

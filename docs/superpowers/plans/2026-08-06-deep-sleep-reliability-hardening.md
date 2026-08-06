@@ -542,12 +542,17 @@ Integration-closeout amendments from final review:
 - Strict-decode every encoded candidate before RTC invalidation or EPD work.
 - Canonicalize fresh secondary departure rows as lists before frame equality.
 - Validate weather usability on every wake and force a fetch on date mismatch,
-  even when its elapsed pull interval is not due.
-- Reject blank stop names and cap names at 32 characters; exercise a two-stop,
-  three-departure, non-BMP-name frame with weather under the 2048-byte budget.
+  even when its elapsed pull interval is not due. Run a due daily NTP resync
+  before weather/footer local-date decisions so a midnight correction cannot
+  validate yesterday's forecast and then render today's footer.
+- Reject blank stop names and cap names at 48 characters so the committed
+  42-character example remains valid; exercise a two-stop, three-departure,
+  non-BMP-name frame with all semantic fields at their test maxima under the
+  2048-byte budget (1975 bytes, 73-byte headroom).
 - Recovery disables STA, invalidates RTC, sleeps for 60 seconds, and resets if
   deep sleep returns. Missing credentials remain an ordinary committed
-  Wi-Fi-error wake.
+  Wi-Fi-error wake. The ordinary next-wake `deepsleep()` call has the same hard
+  reset fallback if it unexpectedly returns.
 - Carry a successful cold-boot NTP epoch into the first cycle so it is retained
   without a duplicate NTP request.
 

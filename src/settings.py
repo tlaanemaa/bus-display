@@ -14,9 +14,9 @@ if False:
 PATH = "/settings.json"
 
 # Keeps the owner-controlled portion of a maximum two-stop semantic frame
-# comfortably inside retained.MAX_BYTES (2048), even when every character
-# expands to a non-BMP JSON escape on CPython. See the retained budget test.
-MAX_STOP_NAME_CHARS = 32
+# inside retained.MAX_BYTES (2048), even when every character expands to a
+# non-BMP JSON escape on CPython. See the retained budget test.
+MAX_STOP_NAME_CHARS = 48
 
 
 class SettingsError(ValueError):

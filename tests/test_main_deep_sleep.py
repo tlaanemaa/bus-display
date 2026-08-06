@@ -614,6 +614,14 @@ def test_recovery_resets_if_deep_sleep_unexpectedly_returns(app, capsys):
     assert "boom" in capsys.readouterr().out
 
 
+def test_normal_sleep_resets_if_deep_sleep_unexpectedly_returns(app):
+    app.run_cycle(changed=False)
+    delay_ms = app.machine.deepsleep_calls[-1]
+    assert delay_ms != 60_000
+    assert app.machine.reset_calls == 1
+    assert app.events.index(("deepsleep", delay_ms)) < app.events.index("reset")
+
+
 def test_main_routes_unexpected_deep_sleep_failure_to_recovery(app, monkeypatch):
     app.rtc.raw = b"seed"
     monkeypatch.setattr(app.main.settings, "load", lambda: app.cfg)
@@ -728,6 +736,68 @@ def test_prior_day_weather_fetches_immediately_even_inside_interval(
     )
     assert decoded is not None
     assert decoded["weather"]["date"] == "2026-08-06"
+
+
+def test_due_ntp_crossing_midnight_rechecks_weather_before_footer(
+    app, monkeypatch,
+):
+    cfg = _valid_cfg({
+        "enabled": True, "latitude": 59.33, "longitude": 18.06,
+        "pull_interval_min": 30, "max_age_min": 180,
+    })
+    clock = {"date": "2026-08-05"}
+    old_reading = {
+        "date": "2026-08-05", "condition": "clear",
+        "tmin": 10, "tmax": 20, "precip": 0,
+    }
+    state = dict(app.state_unchanged)
+    state.update(
+        settings=app.main.retained.settings_fingerprint(cfg),
+        frame=[[app.main.display.stop_section(
+            "Rosenmalm", [], stale=False,
+        )], ["Ons 5 aug 23:59"], old_reading],
+        weather=old_reading, weather_time=1_000, weather_bucket=0,
+        last_ntp=None,
+    )
+    monkeypatch.setattr(
+        app.main, "_local_today_iso", lambda: clock["date"],
+    )
+    monkeypatch.setattr(
+        app.main, "_local_now_strings",
+        lambda: (("Tor 6 aug", "00:00") if clock["date"] == "2026-08-06"
+                 else ("Ons 5 aug", "23:59")),
+    )
+
+    def settime():
+        app.events.append("ntp")
+        clock["date"] = "2026-08-06"
+
+    monkeypatch.setattr(app.main.ntptime, "settime", settime)
+    weather_fetches = []
+
+    def fetch_today(*_args, **_kwargs):
+        weather_fetches.append(True)
+        return {
+            "daily": {
+                "time": ["2026-08-06"],
+                "temperature_2m_max": [21], "temperature_2m_min": [11],
+            },
+            "hourly": {
+                "time": ["2026-08-06T00:00", "2026-08-06T12:00"],
+                "weather_code": [0, 0],
+                "precipitation_probability": [0, 0],
+            },
+        }
+
+    monkeypatch.setattr(app.main.openmeteo, "fetch_today", fetch_today)
+    app.run_cycle(changed=False, state=state, connected=True, cfg=cfg)
+    assert weather_fetches == [True]
+    decoded = app.main.retained.decode(
+        app.rtc.raw, app.main.retained.settings_fingerprint(cfg), 1,
+    )
+    assert decoded is not None
+    assert decoded["frame"][1] == ["Tor 6 aug 00:00"]
+    assert decoded["frame"][2]["date"] == "2026-08-06"
 
 
 def test_expired_weather_is_not_shown_while_a_long_pull_interval_waits(
