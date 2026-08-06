@@ -75,6 +75,8 @@ WDT_TIMEOUT_MS = 150000     # hardware watchdog: force a reboot if one display_l
 _WDT_FEED_CHUNK_S = 60   # feed the watchdog at least this often while idling between ticks, so a render
                           # interval longer than the WDT window can't trip a spurious reboot during a normal wait
 
+_NTP_RESYNC_INTERVAL_S = 5 * 60  # deep-sleep RTC gained ~16s in ~1h on hardware; keep minute boundaries tight
+
 _FB_WIDTH = 800
 _FB_HEIGHT = 480
 
@@ -355,6 +357,22 @@ async def deep_sleep_cycle(
     last_weather_bucket = state.get("weather_bucket") if state else None
     last_ntp_epoch = state.get("last_ntp") if state else cold_ntp_epoch
 
+    # Deep sleep runs from the ESP32's low-power RTC, which hardware testing
+    # showed can gain many seconds per hour. Correct it before waiting for the
+    # request boundary so the displayed minute follows real wall time. A
+    # failed sync leaves last_ntp_epoch unchanged and retries next wake.
+    if connected and wake_schedule.elapsed_due(
+        time.time(), last_ntp_epoch, _NTP_RESYNC_INTERVAL_S,
+    ):
+        try:
+            wdt.feed()
+            ntptime.settime()
+            last_ntp_epoch = int(time.time())
+            wdt.feed()
+            print("power: pre-boundary NTP resync ok")
+        except Exception as e:
+            print("power: pre-boundary NTP resync failed:", e)
+
     lead_observed_ms = time.ticks_diff(time.ticks_ms(), boot_ticks)
     print("power: preparation took %d ms; requests target epoch %d" % (lead_observed_ms, request_epoch))
     await _wait_until_epoch(wdt, request_epoch)
@@ -379,22 +397,6 @@ async def deep_sleep_cycle(
         else:
             old = previous_sections[i] if i < len(previous_sections) else None
             sections.append(_stale_section(stop, old))
-
-    # RTC survives deep sleep. Resync at most daily, after the boundary and
-    # departures request but before any local-date-dependent weather/footer
-    # decisions. An NTP correction can cross midnight; all later status must
-    # observe the corrected date together.
-    if connected and wake_schedule.elapsed_due(
-        time.time(), last_ntp_epoch, 24 * 3600,
-    ):
-        try:
-            wdt.feed()
-            ntptime.settime()
-            last_ntp_epoch = int(time.time())
-            wdt.feed()
-            print("power: NTP resync ok")
-        except Exception as e:
-            print("power: NTP resync failed:", e)
 
     weather_cfg = cfg.get("weather")
     weather_enabled = bool(weather_cfg and weather_cfg.get("enabled", True)
@@ -482,7 +484,7 @@ async def deep_sleep_cycle(
         print("power: content unchanged -- no panel refresh")
         _rtc_state_commit(raw, cfg)
 
-    advance_s = cfg.get("power", {}).get("wake_advance_s", 3)
+    advance_s = cfg.get("power", {}).get("wake_advance_s", 5)
     delay_s = wake_schedule.next_wake_delay_s(time.time(), advance_s, 60)
     print("power: deep sleep %d s; next wake %d s before minute boundary" % (delay_s, advance_s))
     try:
@@ -562,13 +564,13 @@ async def display_loop(
     consecutive_all_failed = 0  # pulls in a row where EVERY stop errored -> Wi-Fi reconnect trigger
     prev_frame = None     # last-drawn (sections, footer, weather); the 0x10 old plane for the next partial
 
-    # Re-sync the RTC from NTP on a slow (daily) wall-clock bucket. The clock
+    # Re-sync the RTC from NTP on the shared wall-clock bucket. The clock
     # is set once at boot (main()), but the ESP32 RTC drifts over long 24/7
     # uptime, and a FAILED boot sync would otherwise leave the footer clock
     # wrong forever. last_ntp_bucket starts None so the first tick resyncs
     # (harmlessly redundant after a good boot sync, self-healing after a bad
     # one); failures are caught and simply retried on the next tick.
-    ntp_resync_interval_s = 24 * 3600
+    ntp_resync_interval_s = _NTP_RESYNC_INTERVAL_S
     last_ntp_bucket = None
 
     # Optional today-weather footer (see AGENTS.md "Screen design"). Absent
@@ -636,7 +638,7 @@ async def display_loop(
                     print("display_loop: Wi-Fi reconnect attempt failed:", e)
                 consecutive_all_failed = 0
 
-        # Re-sync the RTC from NTP on the slow daily bucket (see above). Kept
+        # Re-sync the RTC from NTP on the shared bucket (see above). Kept
         # inside the loop, not just at boot, so long-uptime drift and a failed
         # boot sync both self-heal. On failure we DON'T advance the bucket, so
         # it retries every tick until it succeeds (bounded by ntptime's own
@@ -774,7 +776,7 @@ async def main() -> None:
     cfg = settings.load()
     power_cfg = cfg.get("power", {})
     deep_sleep = power_cfg.get("deep_sleep", False)
-    wake_advance_s = power_cfg.get("wake_advance_s", 3)
+    wake_advance_s = power_cfg.get("wake_advance_s", 5)
     wifi_cfg = config.load().get("wifi")
 
     if deep_sleep:

@@ -96,7 +96,7 @@ def validate(raw: object) -> "dict[str, Any]":
     if not isinstance(deep_sleep, bool):
         raise SettingsError("power.deep_sleep must be a boolean")
     power["deep_sleep"] = deep_sleep
-    power["wake_advance_s"] = _integer(power.get("wake_advance_s", 3), "power.wake_advance_s", 0, 59)
+    power["wake_advance_s"] = _integer(power.get("wake_advance_s", 5), "power.wake_advance_s", 0, 59)
     cfg["power"] = power
 
     if "weather" in cfg:

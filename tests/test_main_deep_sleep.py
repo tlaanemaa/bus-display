@@ -549,6 +549,30 @@ def test_future_weather_and_ntp_timestamps_cannot_suppress_work(app, monkeypatch
     assert "ntp" in app.events
 
 
+def test_due_ntp_resync_runs_before_request_boundary(app, monkeypatch):
+    state = dict(app.state_unchanged)
+    state["last_ntp"] = None
+
+    async def record_boundary(_wdt, _target):
+        app.events.append("boundary-wait")
+
+    monkeypatch.setattr(app.main, "_wait_until_epoch", record_boundary)
+    app.run_cycle(changed=True, state=state, connected=True)
+
+    assert app.events.index("ntp") < app.events.index("boundary-wait")
+
+
+def test_deep_sleep_ntp_resync_is_due_after_five_minutes(app):
+    state = dict(app.state_unchanged)
+    state["last_ntp"] = 701
+    app.run_cycle(changed=True, state=state, connected=True)
+    assert "ntp" not in app.events
+
+    state["last_ntp"] = 700
+    app.run_cycle(changed=True, state=state, connected=True)
+    assert "ntp" in app.events
+
+
 def test_main_prints_numeric_reset_cause_once_per_boot(app, capsys):
     app.run_main_once()
     output = capsys.readouterr().out

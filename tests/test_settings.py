@@ -38,7 +38,7 @@ def test_validate_preserves_existing_settings_shape_and_defaults():
     assert validated["data_pull_interval_min"] == 1
     assert validated["render_interval_min"] == 1
     assert validated["full_refresh_interval_min"] == 30
-    assert validated["power"] == {"deep_sleep": False, "wake_advance_s": 3}
+    assert validated["power"] == {"deep_sleep": False, "wake_advance_s": 5}
 
 
 @pytest.mark.parametrize("mutate", [
@@ -82,6 +82,7 @@ def test_committed_example_file_loads_and_validates(monkeypatch):
     monkeypatch.setattr(settings, "PATH", str(path))
     loaded = settings.load()
     assert [len(stop["name"]) for stop in loaded["stops"]] == [42, 42]
+    assert loaded["power"]["wake_advance_s"] == 5
 
 
 def test_validate_rejects_nan_weather_coordinates():
