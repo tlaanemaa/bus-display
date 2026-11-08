@@ -25,6 +25,41 @@ BASE_URL = "http://transport.integration.sl.se/v1/sites/%s/departures"
 RETRY_DELAY_S = 3
 
 
+_CHUNK = 512
+
+
+def _stream_departures(resp):
+    """Read the body off the socket in small chunks and reduce it one
+    departure at a time (departures.DepartureSplitter) -- never holding the
+    whole reply or its full object tree. See departures.py for why: the
+    whole-reply json parse's RAM peak starved the Wi-Fi stack. Returns the
+    same {"departures": [...]} shape parse_departures() takes."""
+    import json
+    import departures as dep
+    splitter = dep.DepartureSplitter()
+    out = []
+    length = None
+    try:
+        length = int(resp.headers.get("Content-Length")) if resp.headers else None
+    except Exception:
+        pass
+    got = 0
+    raw = resp.raw
+    while length is None or got < length:
+        want = _CHUNK if length is None else min(_CHUNK, length - got)
+        chunk = raw.read(want)
+        if not chunk:
+            break
+        got += len(chunk)
+        for obj in splitter.feed(chunk):
+            out.append(dep.compact_departure(json.loads(obj)))
+    if length is not None and got < length:
+        raise OSError("short read %d/%d" % (got, length))
+    if not splitter.found_key:
+        raise ValueError("response has no 'departures'")
+    return {"departures": out}
+
+
 def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retries=3, timeout_s=10):
     """timeout_s bounds each attempt so a stuck request (observed
     intermittently right after a fresh Wi-Fi connect -- see CLAUDE.md
@@ -47,12 +82,25 @@ def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retr
         try:
             resp = requests.get(url, timeout=timeout_s)
             try:
-                return resp.json()
+                # A non-200 (SL hiccup, CloudFront 5xx, captive page) or a body
+                # without "departures" is a FAILED fetch, not "zero buses".
+                # Before this check such a reply parsed to [] and silently
+                # replaced the good cache with "No departures" and NO stale
+                # badge -- one of the "buses go missing" causes.
+                if resp.status_code != 200:
+                    raise OSError("HTTP %d" % resp.status_code)
+                return _stream_departures(resp)
             finally:
                 resp.close()
         except Exception as e:
             last_err = e
             print("sl: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
+            # 429 = SL's rate limit. Retrying 3 s later just got another 429
+            # (seen on hardware 2026-11-08) and spends more of the quota, so
+            # give up for this pull; the cache keeps counting down locally and
+            # one missed pull is far below the STALE threshold.
+            if "HTTP 429" in str(e):
+                break
             if attempt < retries - 1:
                 time.sleep(RETRY_DELAY_S)
     raise last_err

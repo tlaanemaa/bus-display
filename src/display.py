@@ -529,6 +529,22 @@ def _draw_footer_error_line(fb, message, datetime_str, ly):
 WEATHER_ERROR = "error"  # sentinel for the `weather` param: fetch failed, show an explicit message
 
 
+def frame_from_json(obj):
+    """Rebuild a (sections, footer, weather) frame after a JSON round-trip
+    (main.py keeps the on-panel frame in RTC memory so a reboot can do a
+    differential partial against it instead of a full flashing refresh).
+    JSON turns tuples into lists; section rows are %-formatted as tuples, so
+    restore those. Returns None for anything malformed -> caller does a full."""
+    try:
+        sections, footer, weather = obj
+        for s in sections:
+            s["rows"] = [tuple(r) for r in s["rows"]]
+            section_lines(s)   # validates every key draw_home/section_lines need
+        return (sections, list(footer), weather)
+    except Exception:
+        return None
+
+
 def draw_home(fb, sections, footer, weather=None):
     """Draws each stop's section (from stop_section()) top-to-bottom, then the
     footer (from footer_lines(), plus weather) anchored near the bottom. A

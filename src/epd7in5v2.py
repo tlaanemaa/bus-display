@@ -168,6 +168,7 @@ class EPD7in5V2:
         self._command(0x13)
         self._write_fill(0x00, BUF_SIZE)
         self._command(0x12)
+        self.trigger_ms = time.ticks_ms()  # waveform start, for app.py's refresh lead timing
         time.sleep_ms(100)
         self._read_busy()
 
@@ -184,6 +185,7 @@ class EPD7in5V2:
         self._command(0x13)
         self._write_bulk(buf)
         self._command(0x12)
+        self.trigger_ms = time.ticks_ms()  # waveform start, for app.py's refresh lead timing
         time.sleep_ms(100)
         self._read_busy()
 
@@ -254,6 +256,7 @@ class EPD7in5V2:
         self._write_bulk_inverted(buf)
 
         self._command(0x12)
+        self.trigger_ms = time.ticks_ms()  # waveform start, for app.py's refresh lead timing
         time.sleep_ms(100)
         self._read_busy()
 
