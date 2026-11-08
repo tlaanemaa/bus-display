@@ -97,6 +97,7 @@ _AP_RETRY_AFTER_S = 10 * 60  # with saved creds, the setup AP reboots after this
 _MIN_VALID_YEAR = 2025       # RTC year below this = clock never set -> can't do local countdowns
 
 # Two schedules per minute (added 2026-11-08, see CLAUDE.md "Timing"):
+_DOWN_AFTER_FAILS = 2  # failed pulls in a row before a stop is logged DOWN (field log)
 _NET_OFFSET_S = 20           # network work (SL, weather, NTP) runs at HH:MM:20: off the top-of-minute
                              # rush (SL 429s clustered there), and ~30 s before the next refresh starts
                              # (~10 s lead), so a fetch with a retry or two still finishes in time.
@@ -194,8 +195,13 @@ def _rtc_write():
         print("state: RTC memory write failed:", e)
 
 
+_TRACE_IDF = False  # serial-only: print the IDF pool after each loop phase (bench diagnostics)
+
+
 def _crumb(phase):
     """Mark the loop phase (see _CRUMB_LEN comment)."""
+    if _TRACE_IDF:
+        print("trace: %s done, entering %s, %s" % (_rtc_state.get("crumb", b"").decode(), phase, _idf_mem()))
     _rtc_state["crumb"] = phase.encode()
     _rtc_write()
 
@@ -339,12 +345,15 @@ def _draw_and_refresh(epd, fb, fb_buf, frame, prev_frame, full):
         return _refresh_times(epd, t0, t_done)
 
     # Differential partial: old plane (0x10) first, then new plane (0x13).
-    # init_part() powers the panel, so the whole sequence (including the
-    # draw_home re-renders between planes) is inside the try -> always slept.
+    # The OLD frame is drawn BEFORE init_part() powers the panel: drawing takes
+    # seconds, and the panel shouldn't sit powered while the CPU renders (wear;
+    # found in the 2026-11-08 monitoring). The NEW frame can only be drawn
+    # after the old plane is streamed out (one buffer), so that draw stays
+    # inside the try -> always slept.
+    display.draw_home(fb, *prev_frame)       # OLD frame -> 0x10
     try:
         epd.init_part()
         epd.partial_begin()
-        display.draw_home(fb, *prev_frame)   # OLD frame -> 0x10
         epd.partial_old(fb_buf)
         display.draw_home(fb, *frame)        # NEW frame -> 0x13 (same buffer; draw_home fill(0)s first)
         epd.partial_new(fb_buf)
@@ -466,7 +475,7 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
     # Field-log bookkeeping (see fieldlog.py): log state CHANGES, not every pull.
     stop_down_since = [None] * n_stops   # ticks_ms when this stop started failing (None = up)
     stop_fail_count = [0] * n_stops
-    hb = {"pulls": 0, "pull_fail": 0, "full": 0, "partial": 0, "reconnects": 0}  # counters since last heartbeat
+    hb = {"pulls": 0, "pull_fail": 0, "blips": 0, "full": 0, "partial": 0, "reconnects": 0}  # counters since last heartbeat
     reconnect_logged = False  # only the FIRST forced reconnect of an outage gets its own line (flash wear)
     last_hb_bucket = int(time.time() // 3600)
     boot_ticks = time.ticks_ms()
@@ -544,6 +553,10 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
 
                 # Field log: one line when a stop goes down (with the cause), one when
                 # it comes back (with how long it was out and how many pulls failed).
+                # A stop only counts as DOWN after _DOWN_AFTER_FAILS failed pulls in
+                # a row: SL answers a stray HTTP 429 ~4x/hour, recovered next pull,
+                # and logging each as DOWN+UP filled the flash log ~8x faster than
+                # planned. One-pull misses are counted as "blips" in the heartbeat.
                 hb["pulls"] += 1
                 for i, err in enumerate(errors):
                     name = cfg["stops"][i]["name"]
@@ -552,11 +565,15 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                         stop_fail_count[i] += 1
                         if stop_down_since[i] is None:
                             stop_down_since[i] = time.ticks_ms()
+                        if stop_fail_count[i] == _DOWN_AFTER_FAILS:
                             fieldlog.event("stop '%s' DOWN: %s (free=%d %s)" % (name, err, gc.mem_free(), _idf_mem()))
                     elif stop_down_since[i] is not None:
-                        out_s = time.ticks_diff(time.ticks_ms(), stop_down_since[i]) // 1000
-                        fieldlog.event("stop '%s' UP after %dm%02ds, %d failed pulls"
-                                       % (name, out_s // 60, out_s % 60, stop_fail_count[i]))
+                        if stop_fail_count[i] >= _DOWN_AFTER_FAILS:
+                            out_s = time.ticks_diff(time.ticks_ms(), stop_down_since[i]) // 1000
+                            fieldlog.event("stop '%s' UP after %dm%02ds, %d failed pulls"
+                                           % (name, out_s // 60, out_s % 60, stop_fail_count[i]))
+                        else:
+                            hb["blips"] += 1
                         stop_down_since[i] = None
                         stop_fail_count[i] = 0
 
@@ -573,7 +590,7 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                     save_state(prev_frame)
                 last_pull_bucket = pull_bucket
                 have_fetched = True
-                print("pull: %s free=%d" % (" ".join("FAIL" if f else "ok" for f in failed), gc.mem_free()))
+                print("pull: %s free=%d %s" % (" ".join("FAIL" if f else "ok" for f in failed), gc.mem_free(), _idf_mem()))
 
                 # Every stop failing at once points at connectivity (Wi-Fi/router),
                 # not one stop's SL data. After a few such pulls in a row, force a
@@ -593,7 +610,7 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                         ok = wifi.reconnect(wifi_cfg["ssid"], wifi_cfg.get("password", ""), force=True)
                         hb["reconnects"] += 1
                         if not reconnect_logged:
-                            fieldlog.event("wifi: forced reconnect -> %s (repeats counted in hb)" % ("ok" if ok else "FAILED"))
+                            fieldlog.event("wifi: forced reconnect -> %s (repeats counted in hb) %s" % ("ok" if ok else "FAILED", _idf_mem()))
                             reconnect_logged = True
                     except Exception as e:
                         fieldlog.exception("wifi: forced reconnect raised", e)
@@ -610,8 +627,8 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                 # reboots a handful of times, not every 20 min all day.
                 heal_after_s = _SELF_HEAL_AFTER_S << min(heal_count, _SELF_HEAL_MAX_DOUBLINGS)
                 if time.ticks_diff(time.ticks_ms(), last_any_success_ticks) > heal_after_s * 1000:
-                    fieldlog.event("SELF-HEAL RESET #%d: no successful fetch for %d min (free=%d)"
-                                   % (heal_count + 1, heal_after_s // 60, gc.mem_free()), force=True)
+                    fieldlog.event("SELF-HEAL RESET #%d: no successful fetch for %d min (free=%d %s)"
+                                   % (heal_count + 1, heal_after_s // 60, gc.mem_free(), _idf_mem()), force=True)
                     heal_count += 1
                     _rtc_state["crumb"] = b"selfheal"
                     save_state(prev_frame)
@@ -794,8 +811,8 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
         if hb_bucket != last_hb_bucket:
             up_s = time.ticks_diff(time.ticks_ms(), boot_ticks) // 1000
             stale_now = [t is None or (time.time() - t) > stale_after_s for t in last_good_time]
-            fieldlog.event("hb up=%dh%02dm free=%d %s pulls=%d fail=%d reconnects=%d refresh full=%d part=%d stale=%s heal=%d lead=%d/%d"
-                           % (up_s // 3600, up_s % 3600 // 60, gc.mem_free(), _idf_mem(), hb["pulls"], hb["pull_fail"],
+            fieldlog.event("hb up=%dh%02dm free=%d %s pulls=%d fail=%d blips=%d reconnects=%d refresh full=%d part=%d stale=%s heal=%d lead=%d/%d"
+                           % (up_s // 3600, up_s % 3600 // 60, gc.mem_free(), _idf_mem(), hb["pulls"], hb["pull_fail"], hb["blips"],
                               hb["reconnects"], hb["full"], hb["partial"], stale_now, heal_count,
                               lead_ms[False], lead_ms[True]))
             for k in hb:
@@ -819,13 +836,21 @@ def _idf_mem():
     """'idf=<free>/<largest>' of the ESP-IDF heap -- the pool the Wi-Fi/lwIP
     stack allocates from AND the MicroPython heap grows into. The number that
     actually predicts network failure on this board (DNS -202, Wi-Fi "Internal
-    State Error"), so it goes in the field log next to gc free."""
+    State Error"), so it goes in the field log next to gc free.
+
+    Also 'heap=<total>', the MicroPython heap's size (free + allocated). It
+    only grows (by taking chunks from the IDF pool, never returned), so a
+    jump in it during an outage says the error path grew the heap into
+    Wi-Fi's memory; a flat heap with a falling idf says it's the network
+    stack holding buffers. Added 2026-11-08 to tell the two apart after a
+    boot-time wedge (idf=856 B, DNS failing until self-heal)."""
+    heap = gc.mem_free() + gc.mem_alloc()
     try:
         import esp32
         regions = esp32.idf_heap_info(esp32.HEAP_DATA)
-        return "idf=%d/%d" % (sum(r[1] for r in regions), max(r[2] for r in regions))
+        return "heap=%d idf=%d/%d" % (heap, sum(r[1] for r in regions), max(r[2] for r in regions))
     except Exception:
-        return "idf=?"
+        return "heap=%d idf=?" % heap
 
 
 async def main(fb_buf=None, boot_wifi=None):
