@@ -148,3 +148,32 @@ def test_draw_home_shows_weather_error_instead_of_stale_reading():
     fb = FakeFB(display.PHYS_W, display.PHYS_H)
     content_bottom, footer_top = display.draw_home(fb, sections, footer, display.WEATHER_ERROR)
     assert content_bottom <= footer_top
+
+
+def test_frame_survives_json_roundtrip_for_rtc_memory():
+    # main.py stores the on-panel frame in RTC memory so a reboot can do a
+    # differential partial instead of a full flash -- it must round-trip
+    # through JSON intact (rows back to tuples) and fit with the cache.
+    import json
+    import departures
+    deps = [{"line": "474", "destination": "Slussen via Nacka", "display": "%d min" % m,
+             "expected": "2026-11-08T12:%02d:00" % (20 + m)} for m in range(8)]
+    sections = [display.stop_section("A fairly long stop name", deps[:3], stale=False),
+                display.stop_section("Another stop", deps[:3], stale=True)]
+    weather = {"condition": "rain", "tmin": 3, "tmax": 8, "precip": 70, "date": "2026-11-08"}
+    frame = (sections, display.footer_lines("Sun 8 Nov", "12:19"), weather)
+
+    back = display.frame_from_json(json.loads(json.dumps(frame)))
+    assert back == frame
+    assert [display.section_lines(s) for s in back[0]] == [display.section_lines(s) for s in sections]
+
+    blob = departures.encode_cache([1, 2], [deps, deps], [1, 1], {"frame": frame, "full_t": 1, "heal": 0})
+    assert blob is not None and len(blob) <= 2000
+    caches, _, extra = departures.decode_cache(blob, [1, 2])
+    assert display.frame_from_json(extra["frame"]) == frame
+    assert len(caches[0]) >= 3   # trimming may drop spares, never the shown ones here
+
+
+def test_frame_from_json_rejects_garbage():
+    assert display.frame_from_json(None) is None
+    assert display.frame_from_json([[{"name": "x"}], [], None]) is None

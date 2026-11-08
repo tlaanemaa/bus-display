@@ -9,6 +9,7 @@
   "data_pull_interval_min": 1,
   "render_interval_min": 1,
   "full_refresh_interval_min": 60,
+  "stale_after_min": 5,
   "weather": {
     "enabled": true,
     "latitude": 59.33,

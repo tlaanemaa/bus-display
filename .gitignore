@@ -239,3 +239,6 @@ src/lib/*.mpy
 
 # Host-generated preview renders (tools/preview_*.py output) -- regenerate on demand.
 tools/_preview_*.png
+
+# Field logs pulled off the device (tools/get_logs.bat) -- may contain local details.
+logs/

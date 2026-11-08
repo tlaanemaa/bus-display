@@ -89,3 +89,10 @@ def test_format_date():
 
 def test_format_time():
     assert localtime.format_time(9, 5) == "09:05"
+
+
+def test_naive_seconds_differences():
+    assert localtime.naive_seconds(2000, 1, 1, 0, 0, 0) == 0
+    assert localtime.naive_seconds(2026, 3, 1, 0, 0, 0) - localtime.naive_seconds(2026, 2, 28, 0, 0, 0) == 86400
+    assert localtime.naive_seconds(2024, 3, 1, 0, 0, 0) - localtime.naive_seconds(2024, 2, 28, 0, 0, 0) == 2 * 86400
+    assert localtime.naive_seconds(2027, 1, 1, 0, 0, 5) - localtime.naive_seconds(2026, 12, 31, 23, 59, 55) == 10

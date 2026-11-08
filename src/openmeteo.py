@@ -48,6 +48,9 @@ def fetch_today(latitude, longitude, retries=3, timeout_s=10):
         try:
             resp = requests.get(url, timeout=timeout_s)
             try:
+                # Non-200 = failed fetch (same rule as sl.py), not a payload to parse.
+                if resp.status_code != 200:
+                    raise OSError("HTTP %d" % resp.status_code)
                 return resp.json()
             finally:
                 resp.close()

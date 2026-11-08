@@ -1,9 +1,9 @@
 """Pure UTC -> Stockholm local time conversion (CET/CEST, EU DST rule) and
 formatting. No time/machine imports -- takes a UTC calendar tuple in,
 returns a local one out, so it runs under host CPython with pytest (see
-CLAUDE.md "Testability rule"). The device only has UTC from NTP; SL's own
-`display` field sidesteps this for departure countdowns, but showing the
-actual current date/time in the footer needs real local time, hence this
+CLAUDE.md "Testability rule"). The device only has UTC from NTP; local
+departure countdowns (departures.with_local_countdowns) and the footer
+clock both need real local time, hence this
 module.
 """
 
@@ -74,6 +74,27 @@ def add_hours(year, month, day, hour, minute, second, hours):
                 year -= 1
             day = _days_in_month(year, month)
     return year, month, day, hour, minute, second
+
+
+def days_from_civil(year, month, day):
+    """Days since 2000-01-01 for a proleptic-Gregorian date. Pure integer
+    math (no time.mktime -- see add_hours), used to subtract two naive
+    datetimes as plain second counts."""
+    days = day - 1
+    for m in range(1, month):
+        days += _days_in_month(year, m)
+    for y in range(2000, year):
+        days += 366 if _is_leap(y) else 365
+    for y in range(year, 2000):
+        days -= 366 if _is_leap(y) else 365
+    return days
+
+
+def naive_seconds(year, month, day, hour, minute, second):
+    """Seconds since 2000-01-01T00:00:00 for a naive (timezone-less)
+    datetime. Only meaningful for DIFFERENCES between two values in the
+    same timezone -- e.g. SL's local `expected` vs the device's local now."""
+    return ((days_from_civil(year, month, day) * 24 + hour) * 60 + minute) * 60 + second
 
 
 def utc_to_stockholm(year, month, day, hour, minute, second):
