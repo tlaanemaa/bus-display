@@ -196,6 +196,7 @@ def _rtc_write():
 
 
 _TRACE_IDF = False  # serial-only: print the IDF pool after each loop phase (bench diagnostics)
+sl.TRACE = _TRACE_IDF
 
 
 def _crumb(phase):

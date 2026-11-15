@@ -27,6 +27,22 @@ RETRY_DELAY_S = 3
 
 _CHUNK = 512
 
+# Bench diagnostics (serial only): print the ESP-IDF pool at each step of a
+# fetch. Set from app._TRACE_IDF. Used to find what takes the ~30 KB on the
+# boot's first successful fetch (CLAUDE.md "RAM budget").
+TRACE = False
+
+
+def _t(label):
+    if TRACE:
+        try:
+            import esp32
+            r = esp32.idf_heap_info(esp32.HEAP_DATA)
+            f, a = gc.mem_free(), gc.mem_alloc()
+            print("sltrace: %-14s idf=%d/%d gc_free=%d gc_heap=%d" % (label, sum(x[1] for x in r), max(x[2] for x in r), f, f + a))
+        except Exception:
+            pass
+
 
 def _stream_departures(resp):
     """Read the body off the socket in small chunks and reduce it one
@@ -51,8 +67,13 @@ def _stream_departures(resp):
         if not chunk:
             break
         got += len(chunk)
+        _t("read %d" % got)
         for obj in splitter.feed(chunk):
-            out.append(dep.compact_departure(json.loads(obj)))
+            _t(" split %d" % len(obj))
+            d = json.loads(obj)
+            _t(" parsed")
+            out.append(dep.compact_departure(d))
+        _t("chunk done")
     if length is not None and got < length:
         raise OSError("short read %d/%d" % (got, length))
     if not splitter.found_key:
@@ -79,8 +100,10 @@ def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retr
     last_err = None
     for attempt in range(retries):
         gc.collect()
+        _t("before get")
         try:
             resp = requests.get(url, timeout=timeout_s)
+            _t("headers in")
             try:
                 # A non-200 (SL hiccup, CloudFront 5xx, captive page) or a body
                 # without "departures" is a FAILED fetch, not "zero buses".
@@ -92,6 +115,7 @@ def fetch_departures(site_id, transport="BUS", forecast=60, direction=None, retr
                 return _stream_departures(resp)
             finally:
                 resp.close()
+                _t("closed")
         except Exception as e:
             last_err = e
             print("sl: fetch attempt %d/%d failed: %s" % (attempt + 1, retries, e))
