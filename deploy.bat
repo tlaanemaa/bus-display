@@ -1,44 +1,52 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 rem ===========================================================================
-rem Deploy the bus-display project to the ESP32 over USB, then reset it.
+rem Deploy the bus display to the ESP32 over USB, then reset it.
 rem
-rem   Usage:  deploy.bat [COM_PORT]
-rem   e.g.    deploy.bat            (auto-detects the connected device)
-rem           deploy.bat COM5       (force a specific port)
+rem   Usage:  deploy.bat [files] [COM_PORT]
+rem     deploy.bat          build the firmware (app frozen in), flash it, copy
+rem                         main.py + settings.json + fonts, remove stale .mpy
+rem     deploy.bat files    skip build + flash: only copy main.py + settings.json
+rem                         + fonts (e.g. a settings-only change)
+rem     deploy.bat COM5     force a port (default: auto-detect)
 rem
-rem COMPILES every module to .mpy on the host (mpy-cross), then copies the
-rem bytecode + main.py + settings.json + fonts to the device (src\ maps 1:1 to
-rem the device filesystem root). Compiling on the host, not the device, is
-rem load-bearing on this PSRAM-less board -- on-device compilation fragments
-rem the heap and starves the TLS fetch (see the compile section below and
-rem CLAUDE.md "RAM-vs-HTTPS conflict"). A full copy of the handful of small
-rem files takes a couple of seconds and is harmless to flash.
+rem The app's modules are FROZEN into a custom MicroPython firmware (see
+rem CLAUDE.md "Custom firmware"): they run from flash instead of RAM, which is
+rem what gives the Wi-Fi stack its memory. So a code change means rebuilding
+rem and re-flashing the firmware -- firmware\build.bat (Docker Desktop must be
+rem running) then esptool. Flashing writes only the firmware region; the
+rem board's file system (config.json with the Wi-Fi creds, settings.json, the
+rem field log) is kept.
 rem
-rem Requires mpy-cross:  pip install mpy-cross
-rem Close any open REPL / serial monitor first -- only one process can hold the
-rem COM port at a time.
+rem Files on the board SHADOW frozen modules (sys.path = ['', '.frozen', ...]),
+rem so this script deletes any app .mpy left on the board -- otherwise the old
+rem bytecode would run, and cost its RAM again. To try a one-module change
+rem without re-flashing, copy just that .mpy by hand (mpy-cross + mpremote
+rem fs cp); the next full deploy removes it again.
+rem
+rem Requires: Docker Desktop, esptool, mpremote (pip install esptool mpremote).
+rem Close any open REPL / serial monitor first -- only one program can hold
+rem the COM port.
 rem ===========================================================================
 
-rem With no arg, use mpremote's auto-detect (same as running "python -m mpremote"
-rem with no port -- it picks the one connected device, whatever COM it's on).
-rem Pass a port to force it, e.g. deploy.bat COM5.
-if "%~1"=="" (
-    set "CONN=connect auto"
-    set "PORTDESC=auto-detected device"
+set "FILES_ONLY="
+set "PORT="
+for %%A in (%*) do (
+    if /I "%%~A"=="files" (set "FILES_ONLY=1") else (set "PORT=%%~A")
+)
+if defined PORT (
+    set "CONN=connect %PORT%"
+    set "ESPPORT=--port %PORT%"
 ) else (
-    set "CONN=connect %~1"
-    set "PORTDESC=%~1"
+    set "CONN=connect auto"
+    set "ESPPORT="
 )
 
-set "SRCDIR=%~dp0src"
-
-rem mpremote is run as a Python module (same as your working test.bat:
-rem "python -m mpremote"). If "python" isn't your launcher, change this line
-rem -- e.g. "py -m mpremote" or a full path like
-rem "C:\Users\you\anaconda3\python.exe -m mpremote".
+set "ROOT=%~dp0"
+set "SRCDIR=%ROOT%src"
 set "MP=python -m mpremote"
+set "FW=%ROOT%firmware\dist\bus-display-firmware.bin"
 
 if not exist "%SRCDIR%\settings.json" (
     echo WARNING: %SRCDIR%\settings.json not found.
@@ -47,57 +55,35 @@ if not exist "%SRCDIR%\settings.json" (
     echo.
 )
 
-rem --- precompile EVERY module to .mpy on the host BEFORE copying ----------
-rem The whole app ships as bytecode, not source. Compiling a .py ON THE DEVICE
-rem fragments the heap enough to starve the SL/weather TLS handshake -- the
-rem largest contiguous free block collapses (confirmed on hardware adding
-rem weather: the first fetch hung every boot until these were precompiled; the
-rem contiguous free block jumped ~32KB -> ~90KB -- see CLAUDE.md "RAM-vs-HTTPS
-rem conflict"). Doing it here means an edit to any .py can NEVER ship as a
-rem stale .mpy, and the device never compiles anything but main.py. Needs
-rem mpy-cross (pip install mpy-cross).
-rem
-rem main.py is the ONE exception -- MicroPython auto-runs :main.py by name (no
-rem main.mpy is ever run), so it ships as source and is compiled on-device.
-rem It's small; with everything else precompiled there's ample contiguous RAM.
-for %%F in ("%SRCDIR%\*.py" "%SRCDIR%\lib\*.py") do (
-    if /I not "%%~nxF"=="main.py" (
-        echo   compile %%~nF.mpy
-        python -m mpy_cross "%%F"
-        if errorlevel 1 (
-            echo ERROR: mpy-cross failed for %%~nxF -- is mpy-cross installed?  pip install mpy-cross
-            goto :fail
-        )
-    )
+if not defined FILES_ONLY (
+    echo === Building firmware ...
+    call "%ROOT%firmware\build.bat"
+    if errorlevel 1 goto :fail
+    echo === Flashing firmware ^(file system is kept^) ...
+    python -m esptool %ESPPORT% --baud 460800 write-flash 0x1000 "%FW%"
+    if errorlevel 1 goto :fail
 )
 
-echo Deploying to %PORTDESC% ...
+rem Right after a flash (or any reset) the board is still booting and mpremote
+rem can't get a REPL ("could not enter raw repl"): wait until it answers.
+set /a TRIES=0
+:waitrepl
+%MP% %CONN% exec "pass" >nul 2>nul
+if not errorlevel 1 goto :replok
+set /a TRIES+=1
+if %TRIES% geq 8 goto :fail
+timeout /t 3 /nobreak >nul
+goto :waitrepl
+:replok
 
-rem --- top-level files: main.py (source), the compiled modules, settings ---
-rem Only the .mpy go to the device -- NOT the .py (except main.py). Shipping
-rem the source too would be inert dead flash (MicroPython always prefers the
-rem .mpy) and just invites confusion about which one runs. settings.example.json
-rem is a repo-only template -- the device needs the real settings.json only.
-for %%F in ("%SRCDIR%\main.py" "%SRCDIR%\*.mpy" "%SRCDIR%\*.json") do (
-    if /I not "%%~nxF"=="settings.example.json" (
+echo === Copying files ...
+for %%F in ("%SRCDIR%\main.py" "%SRCDIR%\settings.json") do (
+    if exist "%%F" (
         echo   cp %%~nxF
         %MP% %CONN% fs cp "%%F" ":%%~nxF"
         if errorlevel 1 goto :fail
     )
 )
-
-rem --- vendored libraries (src\lib\ -> :lib) --------------------------------
-rem Compiled above alongside our own modules; only the .mpy ships.
-%MP% %CONN% fs mkdir :lib >nul 2>nul
-for %%F in ("%SRCDIR%\lib\*.mpy") do (
-    echo   cp lib/%%~nxF
-    %MP% %CONN% fs cp "%%F" ":lib/%%~nxF"
-    if errorlevel 1 goto :fail
-)
-
-rem --- streamed bitmap fonts (src\fonts\ -> :fonts) -------------------------
-rem The .fnt files bitfont.py reads glyph-by-glyph from flash (see
-rem tools\gen_font.py). Small (~26 KB total) and never held resident.
 %MP% %CONN% fs mkdir :fonts >nul 2>nul
 for %%F in ("%SRCDIR%\fonts\*.fnt") do (
     echo   cp fonts/%%~nxF
@@ -105,7 +91,17 @@ for %%F in ("%SRCDIR%\fonts\*.fnt") do (
     if errorlevel 1 goto :fail
 )
 
-echo Resetting %PORTDESC% ...
+rem --- remove .mpy that would shadow the frozen modules -------------------
+set "NAMES="
+for %%F in ("%SRCDIR%\*.py") do (
+    if /I not "%%~nxF"=="main.py" set "NAMES=!NAMES!'%%~nF.mpy',"
+)
+for %%F in ("%SRCDIR%\lib\*.py") do set "NAMES=!NAMES!'lib/%%~nF.mpy',"
+echo === Removing stale .mpy that would shadow frozen modules ...
+%MP% %CONN% exec "import os; L=os.listdir(); LL=os.listdir('lib') if 'lib' in L else []; [print('  removed', n) or os.remove(n) for n in (%NAMES%) if n in L or (n[:4]=='lib/' and n[4:] in LL)]"
+if errorlevel 1 goto :fail
+
+echo === Resetting ...
 %MP% %CONN% reset
 if errorlevel 1 goto :fail
 
@@ -117,7 +113,8 @@ exit /b 0
 
 :fail
 echo.
-echo ERROR: a command failed. Check that:
+echo ERROR: a step failed. Check that:
+echo   - Docker Desktop is running (for the firmware build)
 echo   - the COM port is correct  (try: %MP% connect list)
 echo   - no REPL or serial monitor is holding the port
 echo.

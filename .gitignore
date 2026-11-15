@@ -242,3 +242,8 @@ tools/_preview_*.png
 
 # Field logs pulled off the device (tools/get_logs.bat) -- may contain local details.
 logs/
+
+# Custom firmware build output (firmware/build.bat) -- regenerate, do not commit.
+firmware/dist/
+# Board backups (stock firmware image, config.json with Wi-Fi creds) -- local only.
+firmware/backup/

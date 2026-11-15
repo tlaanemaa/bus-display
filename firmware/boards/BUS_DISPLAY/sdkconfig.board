@@ -1,0 +1,6 @@
+# Bus display overrides on top of ports/esp32/boards/sdkconfig.base.
+# Keep this small and measured: every line here changes the firmware the
+# display runs 24/7 (see CLAUDE.md "Custom firmware").
+
+# No Bluetooth (the display never uses it).
+CONFIG_BT_ENABLED=n
