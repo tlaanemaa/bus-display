@@ -415,6 +415,10 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
     """
     epd = EPD7in5V2()
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
+    ship_url = cfg.get("log_ship_url")  # optional LAN log shipping; started after the first pull
+    if not ship_url:
+        fieldlog.sink = None
+        _ship["early"] = []
     # Resident framebuffer: allocated ONCE here (the heap is at its cleanest,
     # ~90KB contiguous) and reused for every refresh. Safe now that nothing
     # does TLS (SL + Open-Meteo are plain HTTP) and more robust than the old
@@ -591,6 +595,26 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                 last_pull_bucket = pull_bucket
                 have_fetched = True
                 print("pull: %s free=%d %s" % (" ".join("FAIL" if f else "ok" for f in failed), gc.mem_free(), _idf_mem()))
+                # Start log shipping now that the first fetch has claimed its
+                # network memory (see _ship).
+                ls = _ship["mod"]
+                if ls is None and ship_url:
+                    gc.collect()
+                    import logship as ls
+                    ls.configure(ship_url, ls.boot_id())
+                    for m, tm in _ship["early"]:
+                        ls.event(m, tm)
+                    _ship["early"] = []
+                    _ship["mod"] = ls
+                    fieldlog.sink = ls.event
+                    print("logship: shipping to", ship_url)
+                # Per-minute status, shipped only (no flash wear): the minute-by-
+                # minute IDF/heap/RSSI trail that the hourly hb can't give, e.g.
+                # leading up to one of the unexplained HARD_RESETs.
+                if ls is not None:
+                    ls.tick("pull=%s free=%d %s rssi=%s up=%dm"
+                            % (",".join("ok" if e is None else "FAIL:%s" % e for e in errors), gc.mem_free(),
+                               _idf_mem(), ls.rssi(), time.ticks_diff(time.ticks_ms(), boot_ticks) // 60000))
 
                 # Every stop failing at once points at connectivity (Wi-Fi/router),
                 # not one stop's SL data. After a few such pulls in a row, force a
@@ -714,6 +738,14 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                     if weather_error != was_error:
                         fieldlog.event("weather: %s" % ("ERROR shown (no fresh reading)" if weather_error else "ok again"))
 
+            # Ship queued log lines to VictoriaLogs (logship.py): one short
+            # plain-HTTP POST per slot, to an IP (no DNS). Last in the slot so it
+            # carries this minute's tick. Failures keep the lines for next time.
+            if _ship["mod"] is not None and _ship["mod"].pending():
+                _crumb("ship")
+                _ship["mod"].flush()
+                _crumb("loop")
+
         # Skip rendering ONLY before the very first pull attempt completes --
         # tracked by have_fetched, NOT inferred from "last_good is empty".
         # A successful pull that legitimately returns zero departures (a normal
@@ -800,6 +832,12 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
                     print("display: %s refresh for %s, started %+d ms vs :00, prep %d + wave %d ms, lands %+d ms, lead now %d"
                           % ("full" if full else "partial", time_str, start_ms - minute_ms, prep, wave,
                              start_ms + seen - minute_ms, lead_ms[full]))
+                    # Ship what the panel now shows (CLAUDE.md: make the code
+                    # corroborate the screen), so it can be checked remotely.
+                    if _ship["mod"] is not None:
+                        _ship["mod"].render("render %s for %s prep=%d wave=%d lands=%+dms | %s"
+                                            % ("full" if full else "partial", time_str, prep, wave,
+                                               start_ms + seen - minute_ms, rendered_key.replace("\n", " | ")))
                 else:
                     print("display: %s refresh for %s" % ("full" if full else "partial", time_str))
         gc.collect()
@@ -832,6 +870,18 @@ async def display_loop(cfg, wifi_cfg=None, rtc_blob=b"", fb_buf=None):
         await _sleep_until_ms(wdt, wake_ms)
 
 
+# LAN log shipping (logship.py) is imported LAZILY, after the first pull: just
+# having its ~3 KB of bytecode in RAM during the boot's first fetch left the
+# IDF pool at ~120 B and crash-looped the board (abort() in the fetch, measured
+# 2026-11-14). Until then, field-log lines wait here as (msg, gmtime).
+_ship = {"mod": None, "early": []}
+
+
+def _early_sink(msg):
+    if len(_ship["early"]) < 12:
+        _ship["early"].append((msg, time.gmtime()))
+
+
 def _idf_mem():
     """'idf=<free>/<largest>' of the ESP-IDF heap -- the pool the Wi-Fi/lwIP
     stack allocates from AND the MicroPython heap grows into. The number that
@@ -857,6 +907,7 @@ async def main(fb_buf=None, boot_wifi=None):
     # Field log first thing: WHY did we boot (power-on / WDT / self-heal...),
     # and what was the previous boot doing (breadcrumb) when it ended.
     fieldlog.stamp = _log_stamp
+    fieldlog.sink = _early_sink  # held until logship is imported after the first pull
     crumb, rtc_blob = _read_rtc()
     fieldlog.event("BOOT cause=%s last_phase=%s free=%d %s" % (_reset_cause_name(), crumb or "-", gc.mem_free(), _idf_mem()), force=True)
     _rtc_state["blob"] = rtc_blob
@@ -939,6 +990,8 @@ def start(fb_buf=None, boot_wifi=None):
         print("main: fatal error -- resetting in %d s (Ctrl-C for REPL):" % _FATAL_RESET_AFTER_S)
         sys.print_exception(e)
         fieldlog.exception("FATAL (reset in %d s)" % _FATAL_RESET_AFTER_S, e, force=True)
+        if _ship["mod"] is not None:
+            _ship["mod"].flush()  # best effort; never raises
         for _ in range(_FATAL_RESET_AFTER_S):
             time.sleep(1)
         machine.reset()

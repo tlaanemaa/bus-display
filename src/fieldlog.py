@@ -31,6 +31,11 @@ MAX_BYTES = 24 * 1024
 # prefix string. Default is "?" so logging works even before that.
 stamp = lambda: "?"
 
+# Set by app.py to also ship every line over the LAN (logship.py). Called with
+# the bare message BEFORE the flash rate cap -- the remote side has no wear
+# limit, so it gets everything. Must not raise (wrapped anyway).
+sink = None
+
 # Flash-wear guard: at most MAX_LINES_PER_HOUR lines per wall-clock hour reach
 # flash. A bug that logs every tick would otherwise write ~1440 lines/day;
 # with the cap the worst case is 24*30 = 720/day, and the overflow is counted
@@ -73,6 +78,11 @@ def event(msg, path=None, old_path=None, max_bytes=None, force=False):
     except Exception:
         line = "? %s\n" % msg
     print("log:", line, end="")
+    if sink is not None:
+        try:
+            sink(msg)
+        except Exception:
+            pass
     try:
         h = _hour()
     except Exception:
